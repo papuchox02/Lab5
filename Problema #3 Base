@@ -1,0 +1,202 @@
+
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.linalg import lu_factor, lu_solve
+from time import perf_counter
+
+# =====================================================
+# LABORATORIO 5 - PROBLEMA 3
+# INVERSA DE LA MATRIZ DE RIGIDEZ
+# METODOS: GAUSS-JORDAN, LU Y NUMPY
+# =====================================================
+
+# 1. MATRIZ DEL PROBLEMA
+K = np.array([
+    [10, -2,  0],
+    [-2,  8, -1],
+    [ 0, -1,  5]
+], dtype=float)
+
+n = K.shape[0]
+I = np.eye(n)
+
+print("=== PROBLEMA 3: MATRIZ DE RIGIDEZ ===")
+print("\nMatriz K:")
+print(K)
+
+
+# 2. METODO DE GAUSS-JORDAN
+def inversa_gauss_jordan(A):
+    n = A.shape[0]
+
+    # Matriz aumentada [A | I]
+    aumentada = np.hstack((
+        A.astype(float).copy(),
+        np.eye(n)
+    ))
+
+    for i in range(n):
+        # Pivoteo parcial
+        fila = i + np.argmax(
+            np.abs(aumentada[i:, i])
+        )
+
+        if abs(aumentada[fila, i]) < 1e-12:
+            raise ValueError("Matriz singular")
+
+        aumentada[[i, fila]] = aumentada[[fila, i]]
+
+        # Normalizar la fila pivote
+        pivote = aumentada[i, i]
+        aumentada[i] /= pivote
+
+        # Eliminar los otros elementos de la columna
+        for j in range(n):
+            if j != i:
+                factor = aumentada[j, i]
+                aumentada[j] -= factor * aumentada[i]
+
+    return aumentada[:, n:]
+
+
+# 3. METODO DE FACTORIZACION LU
+def inversa_lu(A):
+    n = A.shape[0]
+    identidad = np.eye(n)
+
+    # Factorizacion y solucion de A*X = I
+    lu, pivotes = lu_factor(A)
+    inversa = lu_solve((lu, pivotes), identidad)
+
+    return inversa
+
+
+# 4. METODO INCORPORADO DE NUMPY
+def inversa_numpy(A):
+    return np.linalg.inv(A)
+
+
+# 5. CALCULAR LAS INVERSAS
+metodos = {
+    "Gauss-Jordan": inversa_gauss_jordan,
+    "LU": inversa_lu,
+    "NumPy": inversa_numpy
+}
+
+resultados = {}
+
+print("\n=== RESULTADOS ===")
+
+for nombre, funcion in metodos.items():
+    inversa = funcion(K)
+    resultados[nombre] = inversa
+
+    print(f"\nMetodo: {nombre}")
+    print(np.round(inversa, 8))
+
+
+# 6. VERIFICACION DE LA INVERSA
+# Si X es la inversa de K, entonces K*X = I.
+
+referencia = np.linalg.inv(K)
+
+print("\n=== VERIFICACION NUMERICA ===")
+
+for nombre, inversa in resultados.items():
+    producto = K @ inversa
+
+    error = np.linalg.norm(
+        inversa - referencia
+    )
+
+    residuo = np.linalg.norm(
+        producto - I
+    )
+
+    print(f"\nMetodo: {nombre}")
+    print(f"Error absoluto: {error:.6e}")
+    print(f"Residuo ||KX-I||: {residuo:.6e}")
+    print(
+        "Inversa verificada:",
+        np.allclose(producto, I)
+    )
+
+
+# 7. MEDICION DE TIEMPOS
+# Incluye todo el procedimiento de cada metodo.
+
+repeticiones = 1000
+tiempos_resultados = {}
+
+def medir_tiempos(funcion, matriz):
+    mediciones = []
+
+    # Calentamiento inicial
+    for _ in range(10):
+        funcion(matriz)
+
+    for _ in range(repeticiones):
+        inicio = perf_counter()
+        funcion(matriz)
+        fin = perf_counter()
+
+        mediciones.append(fin - inicio)
+
+    return np.array(mediciones)
+
+
+print("\n=== COMPARACION DE TIEMPOS ===")
+print(f"Repeticiones: {repeticiones}")
+
+for nombre, funcion in metodos.items():
+    tiempos = medir_tiempos(funcion, K)
+
+    mediana = np.median(tiempos)
+    media = np.mean(tiempos)
+    desviacion = np.std(tiempos)
+
+    tiempos_resultados[nombre] = mediana
+
+    print(f"\nMetodo: {nombre}")
+    print(f"Mediana: {mediana:.6e} s")
+    print(f"Media: {media:.6e} s")
+    print(f"Desviacion: {desviacion:.6e} s")
+
+
+# 8. DETERMINAR EL METODO MAS RAPIDO
+ganador = min(
+    tiempos_resultados,
+    key=tiempos_resultados.get
+)
+
+print("\n=== CONCLUSION COMPUTACIONAL ===")
+print(f"Metodo mas rapido: {ganador}")
+print(
+    "Tiempo mediano:",
+    f"{tiempos_resultados[ganador]:.6e} s"
+)
+
+# 9. GRAFICA COMPARATIVA
+nombres = list(tiempos_resultados.keys())
+
+tiempos_ms = [
+    tiempos_resultados[nombre] * 1000
+    for nombre in nombres
+]
+
+plt.figure(figsize=(9, 5))
+plt.bar(nombres, tiempos_ms)
+
+plt.title("Comparacion de tiempos - Problema 3")
+plt.xlabel("Metodo numerico")
+plt.ylabel("Tiempo mediano (ms)")
+plt.grid(axis="y", alpha=0.3)
+
+plt.tight_layout()
+plt.savefig(
+    "problema3_tiempos.png",
+    dpi=300
+)
+plt.show()
+
+print("\nGrafica guardada: problema3_tiempos.png")
