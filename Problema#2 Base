@@ -1,0 +1,141 @@
+
+import numpy as np
+from scipy.linalg import lu_factor, lu_solve
+from time import perf_counter
+
+# =====================================================
+# LABORATORIO 5 - PROBLEMA 2
+# CIRCUITO RESISTIVO EQUIVALENTE
+# METODOS: FACTORIZACION LU Y ELIMINACION DE GAUSS
+# =====================================================
+
+# 1. SISTEMA MATRICIAL
+A = np.array([
+    [3, -1, -1],
+    [-1, 4, -2],
+    [-1, -1, 5]
+], dtype=float)
+
+b = np.array([5, 6, 7], dtype=float)
+
+
+# 2. ELIMINACION DE GAUSS CON PIVOTEO PARCIAL
+def eliminacion_gauss(A, b):
+    matriz = A.copy().astype(float)
+    vector = b.copy().astype(float)
+    n = len(vector)
+
+    # Eliminacion hacia adelante
+    for k in range(n - 1):
+        pivote = k + np.argmax(
+            np.abs(matriz[k:, k])
+        )
+
+        if abs(matriz[pivote, k]) < 1e-12:
+            raise ValueError("Matriz singular")
+
+        matriz[[k, pivote]] = matriz[[pivote, k]]
+        vector[[k, pivote]] = vector[[pivote, k]]
+
+        for i in range(k + 1, n):
+            factor = matriz[i, k] / matriz[k, k]
+            matriz[i, k:] -= factor * matriz[k, k:]
+            vector[i] -= factor * vector[k]
+
+    # Sustitucion hacia atras
+    x = np.zeros(n)
+
+    for i in range(n - 1, -1, -1):
+        if abs(matriz[i, i]) < 1e-12:
+            raise ValueError("Matriz singular")
+
+        suma = np.dot(matriz[i, i+1:], x[i+1:])
+        x[i] = (vector[i] - suma) / matriz[i, i]
+
+    return x
+
+
+# 3. FACTORIZACION LU
+def resolver_lu(A, b):
+    lu, pivotes = lu_factor(A)
+    return lu_solve((lu, pivotes), b)
+
+
+# 4. VERIFICAR RESULTADOS
+solucion_gauss = eliminacion_gauss(A, b)
+solucion_lu = resolver_lu(A, b)
+solucion_numpy = np.linalg.solve(A, b)
+
+print("=== PROBLEMA 2: CIRCUITO RESISTIVO ===")
+print("\nMatriz A:")
+print(A)
+print("\nVector b:")
+print(b)
+
+print("\n=== RESULTADOS ===")
+
+for nombre, solucion in [
+    ("Gauss", solucion_gauss),
+    ("LU", solucion_lu),
+    ("NumPy", solucion_numpy)
+]:
+    print(f"\nMetodo: {nombre}")
+
+    for i, valor in enumerate(solucion, start=1):
+        print(f"V{i} = {valor:.8f} V")
+
+    error = np.linalg.norm(solucion - solucion_numpy)
+    residuo = np.linalg.norm(A @ solucion - b)
+
+    print(f"Error absoluto: {error:.6e}")
+    print(f"Residuo: {residuo:.6e}")
+
+
+# 5. COMPARACION DE TIEMPOS
+# Se repite cada metodo varias veces para medir
+# su rendimiento de manera mas confiable.
+
+repeticiones = 1000
+
+def medir_tiempo(funcion):
+    tiempos = []
+
+    for _ in range(repeticiones):
+        inicio = perf_counter()
+        funcion(A, b)
+        tiempos.append(perf_counter() - inicio)
+
+    return np.array(tiempos)
+
+
+tiempos_gauss = medir_tiempo(eliminacion_gauss)
+tiempos_lu = medir_tiempo(resolver_lu)
+
+print("\n=== COMPARACION DE TIEMPOS ===")
+print(f"Repeticiones: {repeticiones}")
+
+for nombre, tiempos in [
+    ("Gauss", tiempos_gauss),
+    ("LU", tiempos_lu)
+]:
+    print(f"\nMetodo: {nombre}")
+    print(
+        f"Mediana: {np.median(tiempos):.6e} s"
+    )
+    print(
+        f"Media: {np.mean(tiempos):.6e} s"
+    )
+    print(
+        f"Desviacion: {np.std(tiempos):.6e} s"
+    )
+
+
+# 6. COMPROBACION FINAL
+print("\n=== VERIFICACION FINAL ===")
+print("Ax =", A @ solucion_lu)
+print("b  =", b)
+
+print(
+    "Coinciden las soluciones:",
+    np.allclose(solucion_gauss, solucion_lu)
+)
