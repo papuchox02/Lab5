@@ -1,0 +1,279 @@
+import csv
+from pathlib import Path
+from time import perf_counter
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+# =====================================================
+# LABORATORIO 5 - PROBLEMA 3
+# INVERSA DE LA MATRIZ DE RIGIDEZ
+# METODOS: GAUSS-JORDAN, FACTORIZACION LU Y NUMPY
+# =====================================================
+
+# 1. Matriz de rigidez original: no modificar sus coeficientes.
+K = np.array([
+    [10, -2, 0],
+    [-2, 8, -1],
+    [0, -1, 5]
+], dtype=float)
+n = K.shape[0]
+I = np.eye(n)
+TOLERANCIA = 1e-12
+
+
+# 2. Inversa por Gauss-Jordan con pivoteo parcial.
+def inversa_gauss_jordan(matriz):
+    A = np.asarray(matriz, dtype=float)
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        raise ValueError("La matriz debe ser cuadrada")
+
+    n = A.shape[0]
+    # Las operaciones elementales se aplican a la matriz aumentada [A | I].
+    aumentada = np.hstack((A.copy(), np.eye(n)))
+
+    for k in range(n):
+        # Elegir como pivote el elemento de mayor magnitud en la columna.
+        fila_pivote = k + np.argmax(np.abs(aumentada[k:, k]))
+        if abs(aumentada[fila_pivote, k]) < TOLERANCIA:
+            raise ValueError("La matriz es singular")
+
+        # Intercambiar filas, normalizar el pivote y eliminar el resto
+        # de elementos de su columna mediante operaciones elementales.
+        aumentada[[k, fila_pivote]] = aumentada[[fila_pivote, k]]
+        aumentada[k] /= aumentada[k, k]
+        for i in range(n):
+            if i != k:
+                factor = aumentada[i, k]
+                aumentada[i] -= factor * aumentada[k]
+
+    return aumentada[:, n:]
+
+
+# 3. Factorizacion LU con pivoteo parcial. Se obtiene P @ A = L @ U.
+def factorizar_lu(matriz):
+    A = np.asarray(matriz, dtype=float)
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        raise ValueError("La matriz debe ser cuadrada")
+
+    n = A.shape[0]
+    U = A.copy()
+    L = np.eye(n)
+    P = np.eye(n)
+
+    for k in range(n - 1):
+        # Pivoteo parcial: seleccionar el mayor pivote absoluto disponible.
+        fila_pivote = k + np.argmax(np.abs(U[k:, k]))
+        if abs(U[fila_pivote, k]) < TOLERANCIA:
+            raise ValueError("La matriz es singular")
+
+        if fila_pivote != k:
+            U[[k, fila_pivote]] = U[[fila_pivote, k]]
+            P[[k, fila_pivote]] = P[[fila_pivote, k]]
+            # Los multiplicadores ya calculados deben seguir a su fila.
+            L[[k, fila_pivote], :k] = L[[fila_pivote, k], :k]
+
+        # Guardar los multiplicadores en L y triangularizar U.
+        for i in range(k + 1, n):
+            L[i, k] = U[i, k] / U[k, k]
+            U[i, k:] -= L[i, k] * U[k, k:]
+
+    if abs(U[-1, -1]) < TOLERANCIA:
+        raise ValueError("La matriz es singular")
+    return P, L, U
+
+
+def resolver_lu(L, U, P, vector):
+    """Resolver P*A*x = P*b mediante sustituciones triangulares."""
+    n = vector.size
+    Pb = P @ vector
+
+    # Sustitucion hacia adelante: L*y = P*b.
+    y = np.zeros(n)
+    for i in range(n):
+        y[i] = (Pb[i] - np.dot(L[i, :i], y[:i])) / L[i, i]
+
+    # Sustitucion hacia atras: U*x = y.
+    x = np.zeros(n)
+    for i in range(n - 1, -1, -1):
+        x[i] = (y[i] - np.dot(U[i, i + 1:], x[i + 1:])) / U[i, i]
+    return x
+
+
+def inversa_lu(matriz):
+    # Se calcula la factorizacion en cada llamada para incluir su costo
+    # completo en las mediciones de tiempo de la inversa.
+    P, L, U = factorizar_lu(matriz)
+    identidad = np.eye(matriz.shape[0])
+    inversa = np.empty_like(identidad)
+    for columna in range(identidad.shape[1]):
+        inversa[:, columna] = resolver_lu(
+            L, U, P, identidad[:, columna]
+        )
+    return inversa
+
+
+# 4. Inversa con NumPy, usada como metodo comparativo y referencia.
+def inversa_numpy(matriz):
+    return np.linalg.inv(matriz)
+
+
+metodos = {
+    "Gauss-Jordan": inversa_gauss_jordan,
+    "LU": inversa_lu,
+    "NumPy": inversa_numpy,
+}
+
+# Calcular una vez las matrices y las metricas, separadas de las mediciones.
+referencia = inversa_numpy(K)
+resultados = {
+    nombre: funcion(K)
+    for nombre, funcion in metodos.items()
+}
+metricas = {}
+for nombre, inversa in resultados.items():
+    metricas[nombre] = {
+        "error_frobenius": float(np.linalg.norm(inversa - referencia, ord="fro")),
+        "residuo": float(np.linalg.norm(K @ inversa - I, ord="fro")),
+        "verificada": bool(np.allclose(K @ inversa, I)),
+    }
+
+P, L, U = factorizar_lu(K)
+residuo_lu = float(np.linalg.norm(P @ K - L @ U, ord="fro"))
+descomposicion_verificada = bool(np.allclose(P @ K, L @ U))
+
+print("=== PROBLEMA 3: INVERSA DE LA MATRIZ DE RIGIDEZ ===")
+print("\nMatriz K:")
+print(K)
+print("\n=== FACTORIZACION LU CON PIVOTEO PARCIAL ===")
+print("P =")
+print(P)
+print("L =")
+print(L)
+print("U =")
+print(U)
+print("Verificacion P @ K = L @ U:", descomposicion_verificada)
+print(f"Residuo de la factorizacion: {residuo_lu:.6e}")
+
+print("\n=== INVERSAS CALCULADAS ===")
+for nombre, inversa in resultados.items():
+    print(f"\n{nombre}:")
+    print(np.array2string(inversa, precision=10, suppress_small=True))
+
+# 5. Comparar error de Frobenius, residuo y verificacion para cada metodo.
+print("\n=== COMPARACION DE RESULTADOS ===")
+for nombre in metodos:
+    datos = metricas[nombre]
+    print(
+        f"{nombre}: error Frobenius={datos['error_frobenius']:.6e}, "
+        f"residuo ||KX-I||F={datos['residuo']:.6e}, "
+        f"verificada={datos['verificada']}"
+    )
+
+# 6. Medir el costo completo de cada inversion, incluida la factorizacion LU.
+repeticiones = 1000
+calentamientos = 10
+tiempos = {}
+estadisticas = {}
+
+for nombre, funcion in metodos.items():
+    # Calentamiento para reducir el efecto de inicializacion de bibliotecas.
+    for _ in range(calentamientos):
+        funcion(K)
+
+    muestras = np.empty(repeticiones)
+    for i in range(repeticiones):
+        inicio = perf_counter()
+        funcion(K)
+        muestras[i] = perf_counter() - inicio
+
+    tiempos[nombre] = muestras
+    estadisticas[nombre] = {
+        "mediana": float(np.median(muestras)),
+        "media": float(np.mean(muestras)),
+        "desviacion_estandar": float(np.std(muestras)),
+    }
+
+# 7. Tabla consolidada de precision, residuos, tiempos y verificacion.
+print(f"\n=== TABLA COMPARATIVA ({repeticiones} EJECUCIONES) ===")
+print(
+    f"{'Metodo':<16}{'Error Frobenius':>20}{'Residuo ||KX-I||F':>22}"
+    f"{'Mediana (s)':>16}{'Media (s)':>16}{'Desv. est. (s)':>18}"
+    f"{'Verificada':>14}"
+)
+for nombre in metodos:
+    dato = metricas[nombre]
+    tiempo = estadisticas[nombre]
+    print(
+        f"{nombre:<16}{dato['error_frobenius']:>20.6e}"
+        f"{dato['residuo']:>22.6e}{tiempo['mediana']:>16.6e}"
+        f"{tiempo['media']:>16.6e}{tiempo['desviacion_estandar']:>18.6e}"
+        f"{str(dato['verificada']):>14}"
+    )
+
+# La conclusion de rendimiento se determina unicamente con las medianas medidas.
+metodo_mas_rapido = min(estadisticas, key=lambda nombre: estadisticas[nombre]["mediana"])
+print("\n=== CONCLUSION COMPUTACIONAL ===")
+print(
+    f"Menor mediana medida: {metodo_mas_rapido} "
+    f"({estadisticas[metodo_mas_rapido]['mediana']:.6e} s)"
+)
+print("La medicion de LU incluye factorizacion y resolucion para todas las columnas.")
+
+# 8. Exportar metricas y entradas de la inversa a CSV junto al script.
+directorio_salida = Path(__file__).resolve().parent
+archivo_csv = directorio_salida / "problema3_resultados.csv"
+with archivo_csv.open("w", newline="", encoding="utf-8-sig") as archivo:
+    campos = [
+        "metodo",
+        "error_frobenius",
+        "residuo_KX_menos_I_frobenius",
+        "mediana_s",
+        "media_s",
+        "desviacion_estandar_s",
+        "verificada",
+        "X_11", "X_12", "X_13",
+        "X_21", "X_22", "X_23",
+        "X_31", "X_32", "X_33",
+    ]
+    escritor = csv.DictWriter(archivo, fieldnames=campos)
+    escritor.writeheader()
+    for nombre, inversa in resultados.items():
+        fila = {
+            "metodo": nombre,
+            "error_frobenius": metricas[nombre]["error_frobenius"],
+            "residuo_KX_menos_I_frobenius": metricas[nombre]["residuo"],
+            "mediana_s": estadisticas[nombre]["mediana"],
+            "media_s": estadisticas[nombre]["media"],
+            "desviacion_estandar_s": estadisticas[nombre]["desviacion_estandar"],
+            "verificada": metricas[nombre]["verificada"],
+        }
+        fila.update({
+            f"X_{i + 1}{j + 1}": float(inversa[i, j])
+            for i in range(n)
+            for j in range(n)
+        })
+        escritor.writerow(fila)
+print(f"\nResultados exportados a: {archivo_csv}")
+
+# 9. Graficar las medianas; las barras de error representan desviaciones estandar.
+nombres = list(metodos)
+medianas = [estadisticas[nombre]["mediana"] for nombre in nombres]
+desviaciones = [
+    estadisticas[nombre]["desviacion_estandar"]
+    for nombre in nombres
+]
+
+figura, eje = plt.subplots(figsize=(9, 5))
+barras = eje.bar(nombres, medianas, yerr=desviaciones, capsize=5)
+eje.set_title("Comparacion de tiempos - Problema 3")
+eje.set_xlabel("Metodo")
+eje.set_ylabel("Tiempo por ejecucion (s)")
+eje.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+eje.grid(axis="y", alpha=0.3)
+eje.bar_label(barras, labels=[f"{valor:.2e}" for valor in medianas], padding=3)
+figura.tight_layout()
+archivo_grafica = directorio_salida / "problema3_tiempos.png"
+figura.savefig(archivo_grafica, dpi=300)
+print(f"Grafica guardada en: {archivo_grafica}")
+plt.show()
