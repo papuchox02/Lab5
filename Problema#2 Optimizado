@@ -1,0 +1,247 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from time import perf_counter
+
+# =====================================================
+# LABORATORIO 5 - PROBLEMA 2
+# CIRCUITO RESISTIVO EQUIVALENTE
+# METODOS: ELIMINACION DE GAUSS Y FACTORIZACION LU
+# =====================================================
+
+# 1. Sistema matricial original Ax = b, con x = [V1, V2, V3].
+A = np.array([
+    [3, -1, -1],
+    [-1, 4, -2],
+    [-1, -1, 5]
+], dtype=float)
+b = np.array([5, 6, 7], dtype=float)
+
+
+# 2. Eliminacion de Gauss con pivoteo parcial.
+def eliminacion_gauss(matriz, vector):
+    # Se trabaja con copias para conservar intactos A y b.
+    U = np.asarray(matriz, dtype=float).copy()
+    rhs = np.asarray(vector, dtype=float).copy()
+
+    if U.ndim != 2 or U.shape[0] != U.shape[1]:
+        raise ValueError("La matriz debe ser cuadrada")
+    if rhs.ndim != 1 or rhs.size != U.shape[0]:
+        raise ValueError("El vector debe tener una entrada por ecuacion")
+
+    n = rhs.size
+
+    # Eliminacion hacia adelante: triangularizar la matriz.
+    for k in range(n - 1):
+        # Elegir como pivote el elemento de mayor valor absoluto en la columna.
+        fila_pivote = k + np.argmax(np.abs(U[k:, k]))
+        if abs(U[fila_pivote, k]) < 1e-12:
+            raise ValueError("Matriz singular")
+
+        # Intercambiar tanto las filas de la matriz como las del vector.
+        U[[k, fila_pivote]] = U[[fila_pivote, k]]
+        rhs[[k, fila_pivote]] = rhs[[fila_pivote, k]]
+
+        # Anular los elementos debajo del pivote.
+        for i in range(k + 1, n):
+            factor = U[i, k] / U[k, k]
+            U[i, k:] -= factor * U[k, k:]
+            rhs[i] -= factor * rhs[k]
+
+    if abs(U[-1, -1]) < 1e-12:
+        raise ValueError("Matriz singular")
+
+    # Sustitucion hacia atras en el sistema triangular superior.
+    x = np.zeros(n)
+    for i in range(n - 1, -1, -1):
+        suma = np.dot(U[i, i + 1:], x[i + 1:])
+        x[i] = (rhs[i] - suma) / U[i, i]
+    return x
+
+
+# 3. Factorizacion LU con pivoteo parcial: P @ A = L @ U.
+def factorizar_lu(matriz):
+    # P registra permutaciones; L guarda multiplicadores y U la parte superior.
+    U = np.asarray(matriz, dtype=float).copy()
+    if U.ndim != 2 or U.shape[0] != U.shape[1]:
+        raise ValueError("La matriz debe ser cuadrada")
+
+    n = U.shape[0]
+    P = np.eye(n)
+    L = np.eye(n)
+
+    for k in range(n - 1):
+        # Seleccionar e intercambiar la fila con el pivote mayor en valor absoluto.
+        fila_pivote = k + np.argmax(np.abs(U[k:, k]))
+        if abs(U[fila_pivote, k]) < 1e-12:
+            raise ValueError("Matriz singular")
+
+        if fila_pivote != k:
+            U[[k, fila_pivote]] = U[[fila_pivote, k]]
+            P[[k, fila_pivote]] = P[[fila_pivote, k]]
+            # Intercambiar en L solo las columnas ya calculadas.
+            L[[k, fila_pivote], :k] = L[[fila_pivote, k], :k]
+
+        # Guardar cada multiplicador en L y eliminar debajo del pivote en U.
+        for i in range(k + 1, n):
+            L[i, k] = U[i, k] / U[k, k]
+            U[i, k:] -= L[i, k] * U[k, k:]
+
+    if abs(U[-1, -1]) < 1e-12:
+        raise ValueError("Matriz singular")
+    return P, L, U
+
+
+def sustitucion_adelante(L, vector):
+    """Resuelve L*y = vector para una matriz triangular inferior."""
+    n = vector.size
+    y = np.zeros(n)
+    for i in range(n):
+        y[i] = (vector[i] - np.dot(L[i, :i], y[:i])) / L[i, i]
+    return y
+
+
+def sustitucion_atras(U, vector):
+    """Resuelve U*x = vector para una matriz triangular superior."""
+    n = vector.size
+    x = np.zeros(n)
+    for i in range(n - 1, -1, -1):
+        x[i] = (vector[i] - np.dot(U[i, i + 1:], x[i + 1:])) / U[i, i]
+    return x
+
+
+def resolver_lu(matriz, vector):
+    # Se incluye la factorizacion en cada llamada para que el tiempo sea
+    # comparable con Gauss, que tambien comienza desde la matriz original.
+    P, L, U = factorizar_lu(matriz)
+    y = sustitucion_adelante(L, P @ vector)
+    return sustitucion_atras(U, y)
+
+
+# 4. Resolver por ambos metodos y usar NumPy solo como referencia de validacion.
+solucion_gauss = eliminacion_gauss(A, b)
+P, L, U = factorizar_lu(A)
+solucion_lu = sustitucion_atras(U, sustitucion_adelante(L, P @ b))
+solucion_numpy = np.linalg.solve(A, b)
+
+# Medir la precision de cada metodo frente a la solucion de referencia.
+errores = {
+    "Gauss": np.abs(solucion_gauss - solucion_numpy),
+    "LU": np.abs(solucion_lu - solucion_numpy),
+}
+residuos = {
+    "Gauss": np.linalg.norm(A @ solucion_gauss - b),
+    "LU": np.linalg.norm(A @ solucion_lu - b),
+}
+errores_norma = {
+    nombre: np.linalg.norm(error)
+    for nombre, error in errores.items()
+}
+
+print("=== PROBLEMA 2: CIRCUITO RESISTIVO ===")
+print("\nSistema matricial original:")
+print("A =")
+print(A)
+print("b =", b)
+
+print("\n=== FACTORIZACION LU CON PIVOTEO PARCIAL ===")
+print("P =")
+print(P)
+print("L =")
+print(L)
+print("U =")
+print(U)
+print("Verificacion P @ A = L @ U:", np.allclose(P @ A, L @ U))
+print("Residuo de la descomposicion:", f"{np.linalg.norm(P @ A - L @ U):.6e}")
+
+print("\n=== VOLTAJES ===")
+for nombre, solucion in (
+    ("Gauss", solucion_gauss),
+    ("LU", solucion_lu),
+    ("numpy.linalg.solve (referencia)", solucion_numpy),
+):
+    valores = " | ".join(
+        f"V{indice} = {valor:.8f} V"
+        for indice, valor in enumerate(solucion, start=1)
+    )
+    print(f"{nombre}: {valores}")
+
+# 5. Medir muchas ejecuciones; cada llamada a LU incluye factorizacion y solucion.
+repeticiones = 1000
+
+
+def medir_tiempos(funcion, matriz, vector, cantidad):
+    muestras = np.empty(cantidad)
+    for indice in range(cantidad):
+        inicio = perf_counter()
+        funcion(matriz, vector)
+        muestras[indice] = perf_counter() - inicio
+    return muestras
+
+
+tiempos = {
+    "Gauss": medir_tiempos(eliminacion_gauss, A, b, repeticiones),
+    "LU": medir_tiempos(resolver_lu, A, b, repeticiones),
+}
+estadisticas = {
+    nombre: (
+        float(np.median(muestras)),
+        float(np.mean(muestras)),
+        float(np.std(muestras)),
+    )
+    for nombre, muestras in tiempos.items()
+}
+
+# 6. Tabla de comparacion: precision (error absoluto y residuo) y rendimiento.
+print("\n=== COMPARACION DE GAUSS Y LU ===")
+print(f"Repeticiones por metodo: {repeticiones}")
+print(
+    f"{'Metodo':<10}{'V1 (V)':>12}{'V2 (V)':>12}{'V3 (V)':>12}"
+    f"{'Error abs. norm.':>20}{'Residuo':>14}"
+    f"{'Mediana (s)':>16}{'Media (s)':>16}{'Desv. est. (s)':>18}"
+)
+for nombre, solucion in (("Gauss", solucion_gauss), ("LU", solucion_lu)):
+    mediana, media, desviacion = estadisticas[nombre]
+    print(
+        f"{nombre:<10}{solucion[0]:>12.6f}{solucion[1]:>12.6f}"
+        f"{solucion[2]:>12.6f}{errores_norma[nombre]:>20.6e}"
+        f"{residuos[nombre]:>14.6e}{mediana:>16.6e}"
+        f"{media:>16.6e}{desviacion:>18.6e}"
+    )
+
+print("\nErrores absolutos por voltaje frente a numpy.linalg.solve:")
+for nombre in ("Gauss", "LU"):
+    print(
+        f"{nombre}: "
+        + ", ".join(
+            f"|error V{indice + 1}| = {error:.6e} V"
+            for indice, error in enumerate(errores[nombre])
+        )
+    )
+
+print("\n=== COMPROBACION FINAL ===")
+print("Ax con Gauss =", A @ solucion_gauss)
+print("Ax con LU    =", A @ solucion_lu)
+print("b            =", b)
+print("Gauss coincide con LU:", np.allclose(solucion_gauss, solucion_lu))
+print("LU coincide con NumPy:", np.allclose(solucion_lu, solucion_numpy))
+
+# 7. Graficar medianas; las barras de error muestran la desviacion estandar.
+nombres_metodos = ("Gauss", "LU")
+medianas = [estadisticas[nombre][0] for nombre in nombres_metodos]
+desviaciones = [estadisticas[nombre][2] for nombre in nombres_metodos]
+
+figura, eje = plt.subplots()
+barras = eje.bar(
+    nombres_metodos,
+    medianas,
+    yerr=desviaciones,
+    capsize=6,
+    color=("steelblue", "darkorange"),
+)
+eje.set_title("Comparacion de tiempos: Gauss y LU")
+eje.set_ylabel("Tiempo por ejecucion (s)")
+eje.set_xlabel("Metodo")
+eje.ticklabel_format(axis="y", style="sci", scilimits=(0, 0))
+eje.bar_label(barras, labels=[f"{valor:.2e}" for valor in medianas], padding=3)
+figura.tight_layout()
+plt.show()
