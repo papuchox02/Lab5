@@ -1,0 +1,134 @@
+
+import numpy as np
+
+# ==================================================
+# LABORATORIO 5 - PROBLEMA 1
+# ESTRUCTURA EN EQUILIBRIO
+# METODO DE ELIMINACION DE GAUSS
+# ==================================================
+
+# 1. DATOS DEL PROBLEMA
+angulos = np.radians([0, 45, 120])
+
+# Matriz original del PDF: 2 ecuaciones, 3 incognitas
+A_original = np.array([
+    np.cos(angulos),
+    np.sin(angulos)
+])
+
+b_original = np.zeros(2)
+
+print("=== SISTEMA ORIGINAL ===")
+print("Sum Fx = F1*cos(0) + F2*cos(45) + F3*cos(120) = 0")
+print("Sum Fy = F1*sin(0) + F2*sin(45) + F3*sin(120) = 0")
+print("Matriz A:")
+print(A_original)
+print("Vector b:", b_original)
+print("Dimension:", A_original.shape)
+
+print("\nEl sistema tiene 2 ecuaciones y 3 incognitas.")
+print("Por si solo, no determina una solucion numerica unica.")
+
+# 2. Fijar F3 = 100 N como supuesto adicional para obtener un sistema cuadrado.
+# Este valor no se deduce de las dos ecuaciones originales.
+F3 = 100.0
+
+# Al pasar a la derecha los terminos conocidos con F3, queda A*x = b,
+# donde x = [F1, F2].
+A = A_original[:, :2]
+b = -A_original[:, 2] * F3
+
+print("\n=== SISTEMA REDUCIDO ===")
+print("Supuesto adicional: F3 =", F3, "N")
+print("Matriz A:")
+print(A)
+print("Vector b:")
+print(b)
+
+
+# 3. Eliminacion de Gauss con pivoteo parcial.
+def eliminacion_gauss(matriz, vector):
+    # Trabajar sobre copias evita modificar el sistema que se usara para verificar.
+    A = np.asarray(matriz, dtype=float).copy()
+    b = np.asarray(vector, dtype=float).copy()
+
+    # Comprobar que se recibio un sistema cuadrado compatible con el vector.
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        raise ValueError("La matriz debe ser cuadrada")
+    if b.ndim != 1 or b.size != A.shape[0]:
+        raise ValueError("El vector debe tener una entrada por ecuacion")
+
+    n = b.size
+
+    # Eliminacion hacia adelante: triangularizar la matriz.
+    for k in range(n - 1):
+        # Elegir como pivote el elemento de mayor valor absoluto en la columna
+        # actual, desde la diagonal hacia abajo.
+        fila_pivote = k + np.argmax(np.abs(A[k:, k]))
+
+        if abs(A[fila_pivote, k]) < 1e-12:
+            raise ValueError("Sistema singular")
+
+        # Intercambiar la fila pivote con la fila actual, tambien en b.
+        A[[k, fila_pivote]] = A[[fila_pivote, k]]
+        b[[k, fila_pivote]] = b[[fila_pivote, k]]
+
+        # Anular los elementos debajo del pivote aplicando las mismas
+        # operaciones elementales a la matriz y al vector independiente.
+        for i in range(k + 1, n):
+            factor = A[i, k] / A[k, k]
+            A[i, k:] -= factor * A[k, k:]
+            b[i] -= factor * b[k]
+
+    # Sustitucion hacia atras: resolver las ecuaciones triangulares desde
+    # la ultima fila hasta la primera.
+    x = np.zeros(n)
+    for i in range(n - 1, -1, -1):
+        if abs(A[i, i]) < 1e-12:
+            raise ValueError("Sistema singular")
+        suma = np.dot(A[i, i + 1:], x[i + 1:])
+        x[i] = (b[i] - suma) / A[i, i]
+
+    return x
+
+
+# 4. Resolver el sistema reducido con la implementacion de Gauss.
+solucion_gauss = eliminacion_gauss(A, b)
+
+# 5. Verificar de forma independiente con la rutina de NumPy.
+solucion_numpy = np.linalg.solve(A, b)
+
+# 6. Calcular el error absoluto para cada incognita y el residuo del sistema.
+error_absoluto = np.abs(solucion_gauss - solucion_numpy)
+residuo = np.linalg.norm(A @ solucion_gauss - b)
+
+F1, F2 = solucion_gauss
+
+# 7. Mostrar resultados y una tabla comparativa de las fuerzas desconocidas.
+print("\n=== RESULTADOS ===")
+print(f"F1 = {F1:.6f} N")
+print(f"F2 = {F2:.6f} N")
+print(f"F3 = {F3:.6f} N")
+print("F2 negativo indica que su sentido real es opuesto al angulo especificado.")
+
+print("\n=== COMPARACION ===")
+print(
+    f"{'Fuerza':<10}{'Gauss (N)':>16}"
+    f"{'numpy.linalg.solve (N)':>25}{'Error absoluto (N)':>23}"
+)
+for indice, nombre in enumerate(("F1", "F2")):
+    print(
+        f"{nombre:<10}{solucion_gauss[indice]:>16.8f}"
+        f"{solucion_numpy[indice]:>16.8f}{error_absoluto[indice]:>23.6e}"
+    )
+print(f"Error absoluto maximo: {np.max(error_absoluto):.6e} N")
+print(f"Residuo del sistema: {residuo:.6e}")
+
+# 8. Comprobar las componentes de las tres fuerzas en el sistema original.
+fuerzas = np.array([F1, F2, F3])
+equilibrio = A_original @ fuerzas
+
+print("\n=== VERIFICACION FISICA ===")
+print(f"Suma de fuerzas en X: {equilibrio[0]:.6e} N")
+print(f"Suma de fuerzas en Y: {equilibrio[1]:.6e} N")
+print(f"Equilibrio aproximado (tolerancia 1e-10 N): {np.allclose(equilibrio, 0, atol=1e-10)}")
