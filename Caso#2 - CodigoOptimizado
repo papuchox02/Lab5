@@ -1,0 +1,596 @@
+"""Caso 2: comparación numérica para una red de dos tanques en serie."""
+
+import csv
+from pathlib import Path
+from statistics import mean, median, pstdev
+from time import perf_counter
+from typing import Callable
+
+import matplotlib.pyplot as plt
+import numpy as np
+from scipy.linalg import lu_factor, lu_solve
+
+# ============================================================
+# LABORATORIO 5 - MÉTODOS NUMÉRICOS
+# CASO 2: RED DE TANQUES CONECTADOS
+# ============================================================
+
+# Parámetros físicos y condición iniciales originales.
+V1 = 100.0            # Volumen tanque 1 (L)
+V2 = 150.0            # Volumen tanque 2 (L)
+Fin = 3.0             # Caudal de entrada al tanque 1 (L/min)
+F1 = 3.0              # Caudal entre tanques (L/min)
+F2 = 3.0              # Caudal de salida del tanque 2 (L/min)
+Cin = 10.0            # Concentración de entrada (mg/L)
+C1_inicial = 0.0      # Concentración inicial tanque 1 (mg/L)
+C2_inicial = 2.0      # Concentración inicial tanque 2 (mg/L)
+
+tiempo_final = 300.0  # min
+h = 1.0               # min; paso original del análisis principal
+tolerancia = 1e-8     # Residuo lineal en mg
+max_iter = 1000
+repeticiones = 50
+pasos_sensibilidad = (2.0, 1.0, 0.5, 0.25)  # min, según el enunciado
+
+DIRECTORIO_SALIDA = Path(__file__).resolve().parent
+x_inicial = np.array([V1 * C1_inicial, V2 * C2_inicial], dtype=float)
+
+# x contiene masas (mg). M tiene unidades 1/min y b, mg/min.
+# Así, dx/dt = M*x + b conserva las unidades de balance de masa.
+M = np.array(
+    [
+        [-F1 / V1, 0.0],
+        [F1 / V1, -F2 / V2],
+    ],
+    dtype=float,
+)
+b = np.array([Fin * Cin, 0.0], dtype=float)
+
+
+def crear_malla_temporal(paso: float) -> np.ndarray:
+    """Construye una malla uniforme que termina exactamente en tiempo_final."""
+    if paso <= 0:
+        raise ValueError("El paso debe ser positivo.")
+    cantidad_pasos = round(tiempo_final / paso)
+    if cantidad_pasos <= 0 or not np.isclose(
+        cantidad_pasos * paso, tiempo_final
+    ):
+        raise ValueError("El paso debe ser positivo y dividir el tiempo final.")
+    return np.linspace(0.0, tiempo_final, cantidad_pasos + 1)
+
+
+def crear_sistema_euler_implicito(
+    paso: float, estado: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Forma (I-hM)x[n+1] = x[n]+h*b; A es adimensional y rhs está en mg."""
+    matriz = np.eye(2) - paso * M
+    rhs = estado + paso * b
+    return matriz, rhs
+
+
+# ------------------------------------------------------------
+# Solvers lineales, mantenidos como implementaciones separadas
+# ------------------------------------------------------------
+def preparar_lu(matriz: np.ndarray) -> Callable[[np.ndarray], tuple[np.ndarray, int]]:
+    """Factoriza A una vez por simulación y reutiliza LU en cada paso temporal."""
+    factor_lu = lu_factor(matriz)
+
+    def resolver(rhs: np.ndarray) -> tuple[np.ndarray, int]:
+        # LU no realiza iteraciones; el conteo se reserva para métodos iterativos.
+        return lu_solve(factor_lu, rhs), 0
+
+    return resolver
+
+
+def resolver_jacobi(
+    matriz: np.ndarray,
+    rhs: np.ndarray,
+    x0: np.ndarray,
+    tol: float = tolerancia,
+    limite: int = max_iter,
+) -> tuple[np.ndarray, int]:
+    """Resuelve A*x=rhs con Jacobi y criterio de residuo absoluto."""
+    diagonal = np.diag(matriz)
+    if np.any(np.abs(diagonal) <= np.finfo(float).eps):
+        raise ValueError("Jacobi requiere elementos diagonales distintos de cero.")
+    resto = matriz - np.diag(diagonal)
+    x = np.array(x0, dtype=float, copy=True)
+
+    for iteracion in range(1, limite + 1):
+        x_nuevo = (rhs - resto @ x) / diagonal
+        if np.linalg.norm(matriz @ x_nuevo - rhs, ord=np.inf) <= tol:
+            return x_nuevo, iteracion
+        x = x_nuevo
+    raise RuntimeError("Jacobi no convergió dentro del límite de iteraciones.")
+
+
+def resolver_gauss_seidel(
+    matriz: np.ndarray,
+    rhs: np.ndarray,
+    x0: np.ndarray,
+    tol: float = tolerancia,
+    limite: int = max_iter,
+) -> tuple[np.ndarray, int]:
+    """Resuelve A*x=rhs con Gauss-Seidel usando valores nuevos en la pasada."""
+    diagonal = np.diag(matriz)
+    if np.any(np.abs(diagonal) <= np.finfo(float).eps):
+        raise ValueError(
+            "Gauss-Seidel requiere elementos diagonales distintos de cero."
+        )
+    x = np.array(x0, dtype=float, copy=True)
+
+    for iteracion in range(1, limite + 1):
+        x_nuevo = x.copy()
+        for fila in range(len(rhs)):
+            suma_izquierda = matriz[fila, :fila] @ x_nuevo[:fila]
+            suma_derecha = matriz[fila, fila + 1 :] @ x[fila + 1 :]
+            x_nuevo[fila] = (
+                rhs[fila] - suma_izquierda - suma_derecha
+            ) / matriz[fila, fila]
+        if np.linalg.norm(matriz @ x_nuevo - rhs, ord=np.inf) <= tol:
+            return x_nuevo, iteracion
+        x = x_nuevo
+    raise RuntimeError("Gauss-Seidel no convergió dentro del límite de iteraciones.")
+
+
+METODOS = ("LU", "Gauss-Seidel", "Jacobi")
+
+
+def radio_espectral_iteracion(metodo: str, matriz: np.ndarray) -> float | None:
+    """Devuelve el radio espectral de la iteración estacionaria, si aplica."""
+    if metodo == "LU":
+        return None
+    diagonal = np.diag(np.diag(matriz))
+    inferior = np.tril(matriz, k=-1)
+    superior = np.triu(matriz, k=1)
+    if metodo == "Jacobi":
+        iteracion = -np.linalg.solve(diagonal, inferior + superior)
+    elif metodo == "Gauss-Seidel":
+        iteracion = -np.linalg.solve(diagonal + inferior, superior)
+    else:
+        raise ValueError(f"Método no reconocido: {metodo}")
+    return float(np.max(np.abs(np.linalg.eigvals(iteracion))))
+
+
+def solucion_analitica(tiempos: np.ndarray) -> np.ndarray:
+    """Solución cerrada de las ecuaciones lineales del balance de masa."""
+    tiempos = np.asarray(tiempos, dtype=float)
+    k1 = F1 / V1
+    k2 = F2 / V2
+    transferencia = F1 / V1
+
+    x1_equilibrio = Fin * Cin / k1
+    x2_equilibrio = transferencia * x1_equilibrio / k2
+    diferencia_x1 = x_inicial[0] - x1_equilibrio
+    diferencia_x2 = x_inicial[1] - x2_equilibrio
+    x1 = x1_equilibrio + diferencia_x1 * np.exp(-k1 * tiempos)
+
+    if np.isclose(k1, k2):
+        acoplamiento = (
+            transferencia
+            * diferencia_x1
+            * tiempos
+            * np.exp(-k2 * tiempos)
+        )
+    else:
+        acoplamiento = (
+            transferencia
+            * diferencia_x1
+            * (np.exp(-k2 * tiempos) - np.exp(-k1 * tiempos))
+            / (k1 - k2)
+        )
+    x2 = (
+        x2_equilibrio
+        + diferencia_x2 * np.exp(-k2 * tiempos)
+        + acoplamiento
+    )
+    return np.column_stack((x1, x2))
+
+
+def simular(
+    metodo: str,
+    paso: float,
+    medir_error_lineal: bool = True,
+) -> dict[str, object]:
+    """Integra con Euler implícito y recoge errores lineales cuando se solicita."""
+    tiempos = crear_malla_temporal(paso)
+    matriz = np.eye(2) - paso * M
+    resolver_lu_preparado = preparar_lu(matriz) if metodo == "LU" else None
+    estados = np.zeros((len(tiempos), 2), dtype=float)
+    estados[0] = x_inicial
+    iteraciones_totales = 0
+    error_lineal_maximo = 0.0
+    error_lineal_rms_suma = 0.0
+    error_lineal_final = 0.0
+    todo_convergio = True
+
+    for indice in range(len(tiempos) - 1):
+        rhs = estados[indice] + paso * b
+        try:
+            if metodo == "LU":
+                assert resolver_lu_preparado is not None
+                siguiente, iteraciones = resolver_lu_preparado(rhs)
+            elif metodo == "Jacobi":
+                siguiente, iteraciones = resolver_jacobi(
+                    matriz, rhs, estados[indice]
+                )
+            elif metodo == "Gauss-Seidel":
+                siguiente, iteraciones = resolver_gauss_seidel(
+                    matriz, rhs, estados[indice]
+                )
+            else:
+                raise ValueError(f"Método no reconocido: {metodo}")
+        except RuntimeError:
+            todo_convergio = False
+            raise
+
+        iteraciones_totales += iteraciones
+        if medir_error_lineal:
+            # NumPy solve es la referencia independiente para cada sistema.
+            solucion_numpy = np.linalg.solve(matriz, rhs)
+            error = float(np.linalg.norm(siguiente - solucion_numpy))
+            error_lineal_maximo = max(error_lineal_maximo, error)
+            error_lineal_rms_suma += error**2
+            error_lineal_final = error
+        estados[indice + 1] = siguiente
+
+    if not medir_error_lineal:
+        return {
+            "tiempos": tiempos,
+            "estados": estados,
+            "iteraciones_totales": iteraciones_totales,
+        }
+
+    analitica = solucion_analitica(tiempos)
+    errores_temporales = np.linalg.norm(estados - analitica, axis=1)
+    valores_finitos = bool(np.all(np.isfinite(estados)))
+    no_negativo = bool(np.min(estados) >= -1e-9)
+    rho = radio_espectral_iteracion(metodo, matriz)
+    matriz_amplificacion = np.linalg.solve(matriz, np.eye(2))
+    rho_euler = float(np.max(np.abs(np.linalg.eigvals(matriz_amplificacion))))
+    euler_estable = rho_euler < 1.0
+    solver_converge = rho is None or rho < 1.0
+    estabilidad = (
+        valores_finitos
+        and no_negativo
+        and todo_convergio
+        and solver_converge
+        and euler_estable
+    )
+
+    pasos = len(tiempos) - 1
+    return {
+        "tiempos": tiempos,
+        "estados": estados,
+        "iteraciones_totales": iteraciones_totales,
+        "iteraciones_por_paso": (
+            iteraciones_totales / pasos if metodo != "LU" else None
+        ),
+        "error_lineal_maximo_mg": error_lineal_maximo,
+        "error_lineal_rms_mg": float(np.sqrt(error_lineal_rms_suma / pasos)),
+        "error_lineal_final_mg": error_lineal_final,
+        "error_temporal_final_mg": float(errores_temporales[-1]),
+        "error_temporal_maximo_mg": float(np.max(errores_temporales)),
+        "estable": estabilidad,
+        "converge_solver": solver_converge,
+        "masas_no_negativas": no_negativo,
+        "estable_euler_implicito": euler_estable,
+        "radio_espectral_iteracion": rho,
+        "radio_espectral_euler": rho_euler,
+        "masa_minima_mg": float(np.min(estados)),
+    }
+
+
+def medir_tiempos(metodo: str, paso: float) -> dict[str, float]:
+    """Mide una simulación completa tras calentamiento, sin el coste de auditoría."""
+    simular(metodo, paso, medir_error_lineal=False)
+    mediciones = []
+    for _ in range(repeticiones):
+        inicio = perf_counter()
+        simular(metodo, paso, medir_error_lineal=False)
+        mediciones.append(perf_counter() - inicio)
+    return {
+        "tiempo_mediano_s": float(median(mediciones)),
+        "tiempo_medio_s": float(mean(mediciones)),
+        "desviacion_tiempo_s": float(pstdev(mediciones)),
+        "tiempo_minimo_s": float(min(mediciones)),
+        "repeticiones_tiempo": repeticiones,
+    }
+
+
+def crear_fila_resultado(
+    metodo: str, paso: float, resultado: dict[str, object]
+) -> dict[str, object]:
+    """Prepara una fila homogénea para los CSV de comparación."""
+    return {
+        "metodo": metodo,
+        "paso_min": paso,
+        "numero_pasos": len(resultado["tiempos"]) - 1,
+        "sistemas_lineales_resueltos": len(resultado["tiempos"]) - 1,
+        "iteraciones_totales": resultado["iteraciones_totales"],
+        "iteraciones_promedio_por_paso": resultado["iteraciones_por_paso"],
+        "error_lineal_maximo_mg": resultado["error_lineal_maximo_mg"],
+        "error_lineal_rms_mg": resultado["error_lineal_rms_mg"],
+        "error_lineal_final_mg": resultado["error_lineal_final_mg"],
+        "error_temporal_final_mg": resultado["error_temporal_final_mg"],
+        "error_temporal_maximo_mg": resultado["error_temporal_maximo_mg"],
+        "estable": resultado["estable"],
+        "converge_solver": resultado["converge_solver"],
+        "masas_no_negativas": resultado["masas_no_negativas"],
+        "estable_euler_implicito": resultado["estable_euler_implicito"],
+        "radio_espectral_iteracion": resultado["radio_espectral_iteracion"],
+        "radio_espectral_euler": resultado["radio_espectral_euler"],
+        "masa_minima_mg": resultado["masa_minima_mg"],
+    }
+
+
+def exportar_csv(nombre: str, filas: list[dict[str, object]]) -> Path:
+    """Exporta una tabla de resultados junto al programa."""
+    destino = DIRECTORIO_SALIDA / nombre
+    if not filas:
+        raise ValueError("No hay filas para exportar.")
+    with destino.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=list(filas[0].keys()))
+        escritor.writeheader()
+        escritor.writerows(filas)
+    return destino
+
+
+def imprimir_comparacion(filas: list[dict[str, object]]) -> None:
+    """Imprime las métricas de error, convergencia y estabilidad."""
+    encabezado = (
+        f"{'Método':<16} {'Sistemas':>9} {'Iter. totales':>13} {'Iter./paso':>11} "
+        f"{'Err. lineal máx. (mg)':>22} {'Err. temporal máx. (mg)':>24} "
+        f"{'Mediana (s)':>13} {'Media ± desv. (s)':>23} {'Estable':>9}"
+    )
+    print(encabezado)
+    print("-" * len(encabezado))
+    for fila in filas:
+        rho = fila["radio_espectral_iteracion"]
+        iteraciones = (
+            str(fila["iteraciones_totales"])
+            if fila["iteraciones_totales"]
+            else "N/A"
+        )
+        iteraciones_paso = (
+            f"{fila['iteraciones_promedio_por_paso']:.3f}"
+            if fila["iteraciones_promedio_por_paso"] is not None
+            else "N/A"
+        )
+        print(
+            f"{fila['metodo']:<16} "
+            f"{fila['sistemas_lineales_resueltos']:>9} "
+            f"{iteraciones:>13} "
+            f"{iteraciones_paso:>11} "
+            f"{fila['error_lineal_maximo_mg']:>22.3e} "
+            f"{fila['error_temporal_maximo_mg']:>24.3e} "
+            f"{fila['tiempo_mediano_s']:>13.3e} "
+            f"{fila['tiempo_medio_s']:.3e} ± "
+            f"{fila['desviacion_tiempo_s']:.3e} "
+            f"{str(fila['estable']):>9}"
+        )
+        print(
+            f"  Radio espectral iterativo de {fila['metodo']}: "
+            f"{'no aplica (LU directo)' if rho is None else f'{rho:.6e}'}"
+        )
+        print(
+            "  Euler implícito estable: "
+            f"{fila['estable_euler_implicito']} "
+            f"(radio de amplificación={fila['radio_espectral_euler']:.6e})"
+        )
+
+
+def crear_graficas(
+    resultados_principales: dict[str, dict[str, object]],
+    filas_sensibilidad: list[dict[str, object]],
+) -> None:
+    """Genera gráficas del sistema dinámico, errores, tiempos y sensibilidad."""
+    plt.rcParams.update(
+        {
+            "font.size": 10,
+            "axes.titlesize": 12,
+            "axes.labelsize": 10,
+            "figure.dpi": 120,
+            "savefig.dpi": 300,
+        }
+    )
+    colores = {"LU": "#0072B2", "Gauss-Seidel": "#D55E00", "Jacobi": "#009E73"}
+    etiquetas = ("Tanque 1", "Tanque 2")
+    tiempos = resultados_principales["LU"]["tiempos"]
+    referencia = solucion_analitica(tiempos)
+
+    # Se conservan las gráficas dinámicas y se agrega la referencia analítica.
+    fig, ejes = plt.subplots(1, 2, figsize=(12, 4.8), sharex=True)
+    for componente, eje in enumerate(ejes):
+        for metodo, resultado in resultados_principales.items():
+            concentracion = resultado["estados"][:, componente] / (
+                V1 if componente == 0 else V2
+            )
+            eje.plot(
+                tiempos,
+                concentracion,
+                color=colores[metodo],
+                label=metodo,
+                linewidth=1.5,
+            )
+        eje.plot(
+            tiempos,
+            referencia[:, componente] / (V1 if componente == 0 else V2),
+            color="black",
+            linestyle=":",
+            label="Solución analítica",
+            linewidth=1.8,
+        )
+        eje.set_title(etiquetas[componente])
+        eje.set_xlabel("Tiempo (min)")
+        eje.set_ylabel("Concentración (mg/L)")
+        eje.grid(True, linestyle=":", alpha=0.65)
+        eje.legend(fontsize=8)
+    fig.suptitle("Evolución de concentraciones: Euler implícito, h = 1 min")
+    fig.tight_layout()
+    fig.savefig(DIRECTORIO_SALIDA / "caso2_concentraciones.png", bbox_inches="tight")
+    plt.close(fig)
+
+    # Este error es el de integración temporal respecto de la solución exacta.
+    fig, eje = plt.subplots(figsize=(8.5, 5))
+    for metodo, resultado in resultados_principales.items():
+        error = np.linalg.norm(resultado["estados"] - referencia, axis=1)
+        eje.semilogy(
+            tiempos,
+            np.maximum(error, np.finfo(float).tiny),
+            color=colores[metodo],
+            label=metodo,
+        )
+    eje.set_title("Error temporal respecto a la solución analítica")
+    eje.set_xlabel("Tiempo (min)")
+    eje.set_ylabel("Error de masa (mg, norma 2; escala logarítmica)")
+    eje.grid(True, which="both", linestyle=":", alpha=0.65)
+    eje.legend()
+    fig.tight_layout()
+    fig.savefig(DIRECTORIO_SALIDA / "caso2_errores.png", bbox_inches="tight")
+    plt.close(fig)
+
+    # Los tiempos son de la simulación completa e incluyen el setup del solver.
+    filas_tiempo = [resultados_principales[nombre] for nombre in METODOS]
+    fig, eje = plt.subplots(figsize=(8, 5))
+    eje.bar(
+        METODOS,
+        [fila["tiempo_mediano_s"] * 1000 for fila in filas_tiempo],
+        color=[colores[nombre] for nombre in METODOS],
+    )
+    eje.set_ylabel("Tiempo mediano por simulación (ms)")
+    eje.set_title(f"Tiempo de ejecución de {repeticiones} ejecuciones (h = {h:g} min)")
+    eje.grid(axis="y", linestyle=":", alpha=0.65)
+    fig.tight_layout()
+    fig.savefig(DIRECTORIO_SALIDA / "caso2_tiempos.png", bbox_inches="tight")
+    plt.close(fig)
+
+    # Sensibilidad: error temporal máximo y tiempo según el paso.
+    fig, ejes = plt.subplots(1, 2, figsize=(12, 4.8))
+    for metodo in METODOS:
+        seleccion = sorted(
+            (fila for fila in filas_sensibilidad if fila["metodo"] == metodo),
+            key=lambda fila: fila["paso_min"],
+        )
+        pasos = [fila["paso_min"] for fila in seleccion]
+        errores = [fila["error_temporal_maximo_mg"] for fila in seleccion]
+        duraciones = [fila["tiempo_mediano_s"] for fila in seleccion]
+        ejes[0].loglog(
+            pasos,
+            np.maximum(errores, np.finfo(float).tiny),
+            marker="o",
+            color=colores[metodo],
+            label=metodo,
+        )
+        ejes[1].plot(
+            pasos,
+            np.asarray(duraciones) * 1000,
+            marker="o",
+            color=colores[metodo],
+            label=metodo,
+        )
+    for eje in ejes:
+        eje.set_xlabel("Paso temporal h (min)")
+        eje.grid(True, which="both", linestyle=":", alpha=0.65)
+        eje.legend()
+    ejes[0].set_title("Sensibilidad del error de integración")
+    ejes[0].set_ylabel("Error temporal máximo (mg, norma 2)")
+    ejes[1].set_title("Sensibilidad del tiempo de ejecución")
+    ejes[1].set_ylabel("Tiempo mediano de simulación (ms)")
+    fig.suptitle("Análisis de sensibilidad del paso temporal")
+    fig.tight_layout()
+    fig.savefig(DIRECTORIO_SALIDA / "caso2_sensibilidad.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def main() -> None:
+    """Ejecuta comparación principal, sensibilidad, exportación y gráficas."""
+    print("=== Caso 2: red de dos tanques en serie ===")
+    print(
+        "Estado en mg; M en 1/min; b en mg/min; "
+        "(I-hM)x[n+1]=x[n]+h*b."
+    )
+    print(
+        f"Parámetros conservados: V1={V1:g} L, V2={V2:g} L, "
+        f"Fin=F1=F2={Fin:g} L/min, Cin={Cin:g} mg/L."
+    )
+    print(
+        "Condición inicial: "
+        f"{x_inicial} mg = [{C1_inicial}, {C2_inicial}] mg/L."
+    )
+    print(
+        "Equilibrio analítico: "
+        f"[{Fin * Cin / (F1 / V1):.3f}, "
+        f"{(F1 / V1) * (Fin * Cin / (F1 / V1)) / (F2 / V2):.3f}] mg"
+    )
+
+    resultados_principales: dict[str, dict[str, object]] = {}
+    filas_principales: list[dict[str, object]] = []
+    for metodo in METODOS:
+        resultado = simular(metodo, h, medir_error_lineal=True)
+        resultado.update(medir_tiempos(metodo, h))
+        resultados_principales[metodo] = resultado
+        fila = crear_fila_resultado(metodo, h, resultado)
+        fila.update(
+            {
+                "tiempo_mediano_s": resultado["tiempo_mediano_s"],
+                "tiempo_medio_s": resultado["tiempo_medio_s"],
+                "desviacion_tiempo_s": resultado["desviacion_tiempo_s"],
+                "tiempo_minimo_s": resultado["tiempo_minimo_s"],
+                "repeticiones_tiempo": repeticiones,
+            }
+        )
+        filas_principales.append(fila)
+
+    print(f"\n=== Comparación principal: h = {h:g} min ===")
+    print(
+        "Error lineal: desviación por paso frente a numpy.linalg.solve. "
+        "Error temporal: trayectoria frente a la solución analítica."
+    )
+    imprimir_comparacion(filas_principales)
+
+    filas_sensibilidad: list[dict[str, object]] = []
+    for paso in pasos_sensibilidad:
+        for metodo in METODOS:
+            resultado = simular(metodo, paso, medir_error_lineal=True)
+            resultado.update(medir_tiempos(metodo, paso))
+            fila = crear_fila_resultado(metodo, paso, resultado)
+            fila.update(
+                {
+                    "tiempo_mediano_s": resultado["tiempo_mediano_s"],
+                    "tiempo_medio_s": resultado["tiempo_medio_s"],
+                    "desviacion_tiempo_s": resultado["desviacion_tiempo_s"],
+                    "repeticiones_tiempo": repeticiones,
+                }
+            )
+            filas_sensibilidad.append(fila)
+
+    archivo_comparacion = exportar_csv("caso2_comparacion.csv", filas_principales)
+    archivo_sensibilidad = exportar_csv(
+        "caso2_sensibilidad.csv", filas_sensibilidad
+    )
+    crear_graficas(resultados_principales, filas_sensibilidad)
+
+    mas_rapido = min(
+        filas_principales, key=lambda fila: fila["tiempo_mediano_s"]
+    )
+    print(
+        f"\nSegún la mediana medida para h={h:g} min y "
+        f"{repeticiones} ejecuciones, el menor tiempo fue el de "
+        f"{mas_rapido['metodo']} ({mas_rapido['tiempo_mediano_s']:.6e} s)."
+    )
+    print("El resultado es específico de esta máquina, configuración y ejecución.")
+    print("\nArchivos generados:")
+    print(f"- {archivo_comparacion}")
+    print(f"- {archivo_sensibilidad}")
+    for nombre in (
+        "caso2_concentraciones.png",
+        "caso2_errores.png",
+        "caso2_tiempos.png",
+        "caso2_sensibilidad.png",
+    ):
+        print(f"- {DIRECTORIO_SALIDA / nombre}")
+
+
+if __name__ == "__main__":
+    main()
