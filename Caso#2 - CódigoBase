@@ -1,1 +1,352 @@
 
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.linalg import lu_factor, lu_solve
+from time import perf_counter
+import csv
+
+# ==========================================================
+# LABORATORIO 5 - METODOS NUMERICOS
+# CASO 2: RED DE TANQUES CONECTADOS
+# COMPARACION: LU, JACOBI Y GAUSS-SEIDEL
+# ==========================================================
+
+# 1. PARAMETROS FISICOS
+V1 = 100.0            # Litros
+V2 = 150.0            # Litros
+
+Fin = 3.0             # L/min
+F1 = 3.0              # L/min
+F2 = 3.0              # L/min
+
+Cin = 10.0            # mg/L
+
+C1_inicial = 0.0      # mg/L
+C2_inicial = 2.0      # mg/L
+
+x_inicial = np.array([
+    V1 * C1_inicial,
+    V2 * C2_inicial
+])
+
+tiempo_final = 300.0
+h = 1.0
+tolerancia = 1e-8
+max_iter = 1000
+repeticiones = 50
+
+
+# 2. MATRIZ DEL MODELO DINAMICO
+# dx/dt = M*x + b
+
+M = np.array([
+    [-F1 / V1, 0.0],
+    [F1 / V1, -F2 / V2]
+])
+
+b = np.array([
+    Fin * Cin,
+    0.0
+])
+
+# Euler implicito:
+# (I - h*M)*x_siguiente = x_actual + h*b
+
+A = np.eye(2) - h * M
+
+
+# 3. DESCOMPOSICION LU
+# Factorizamos una sola vez porque A es constante.
+LU, pivotes = lu_factor(A)
+
+def resolver_lu(A, b, x0=None):
+    solucion = lu_solve((LU, pivotes), b)
+    return solucion, 1
+
+
+# 4. METODO DE JACOBI
+def resolver_jacobi(A, b, x0):
+    x = np.array(x0, dtype=float)
+    D = np.diag(A)
+    R = A - np.diagflat(D)
+
+    if np.any(np.abs(D) < 1e-15):
+        raise ValueError("Diagonal con cero")
+
+    for i in range(1, max_iter + 1):
+        x_nuevo = (b - R @ x) / D
+
+        residuo = np.linalg.norm(
+            A @ x_nuevo - b
+        )
+
+        if residuo < tolerancia:
+            return x_nuevo, i
+
+        x = x_nuevo
+
+    raise RuntimeError("Jacobi no convergio")
+
+
+# 5. METODO DE GAUSS-SEIDEL
+def resolver_gauss_seidel(A, b, x0):
+    x = np.array(x0, dtype=float)
+
+    for i in range(1, max_iter + 1):
+        x_nuevo = x.copy()
+
+        for j in range(len(b)):
+            if abs(A[j, j]) < 1e-15:
+                raise ValueError("Diagonal con cero")
+
+            suma_izquierda = np.dot(
+                A[j, :j], x_nuevo[:j]
+            )
+
+            suma_derecha = np.dot(
+                A[j, j+1:], x[j+1:]
+            )
+
+            x_nuevo[j] = (
+                b[j] - suma_izquierda - suma_derecha
+            ) / A[j, j]
+
+        residuo = np.linalg.norm(
+            A @ x_nuevo - b
+        )
+
+        if residuo < tolerancia:
+            return x_nuevo, i
+
+        x = x_nuevo
+
+    raise RuntimeError("Gauss-Seidel no convergio")
+
+
+# 6. SIMULACION DINAMICA
+tiempos = np.linspace(
+    0,
+    tiempo_final,
+    round(tiempo_final / h) + 1
+)
+
+metodos = {
+    "LU": resolver_lu,
+    "Jacobi": resolver_jacobi,
+    "Gauss-Seidel": resolver_gauss_seidel
+}
+
+
+def simular(metodo):
+    estados = np.zeros((len(tiempos), 2))
+    estados[0] = x_inicial
+
+    iteraciones_totales = 0
+
+    for k in range(len(tiempos) - 1):
+        rhs = estados[k] + h * b
+
+        solucion, iteraciones = metodo(
+            A, rhs, estados[k]
+        )
+
+        estados[k + 1] = solucion
+        iteraciones_totales += iteraciones
+
+    return estados, iteraciones_totales
+
+
+# 7. SOLUCION ANALITICA DE REFERENCIA
+# Valida para los parametros constantes elegidos.
+
+def solucion_referencia(t):
+    t = np.asarray(t)
+
+    x10, x20 = x_inicial
+
+    x1 = 1000 + (x10 - 1000) * np.exp(-0.03*t)
+
+    x2 = (
+        1500
+        + (x20 - 1500) * np.exp(-0.02*t)
+        + 3*(x10 - 1000) * (
+            np.exp(-0.02*t) - np.exp(-0.03*t)
+        )
+    )
+
+    return np.column_stack((x1, x2))
+
+
+referencia = solucion_referencia(tiempos)
+
+
+# 8. COMPARACION DE RESULTADOS
+resultados = {}
+tabla = []
+
+print("\n=== CASO 2: RED DE TANQUES ===")
+print("Metodos: LU, Jacobi y Gauss-Seidel")
+print("Referencia estacionaria: [1000, 1500] mg")
+
+print("\n=== COMPARACION NUMERICA ===")
+
+for nombre, metodo in metodos.items():
+
+    estados, iteraciones = simular(metodo)
+
+    # Repeticiones para medir tiempo
+    mediciones = []
+
+    for _ in range(repeticiones):
+        inicio = perf_counter()
+        simular(metodo)
+        mediciones.append(perf_counter() - inicio)
+
+    tiempo_mediano = np.median(mediciones)
+    tiempo_promedio = np.mean(mediciones)
+    desviacion = np.std(mediciones)
+
+    # Error comparado con solucion analitica
+    errores = np.linalg.norm(
+        estados - referencia, axis=1
+    )
+
+    error_final = errores[-1]
+    error_maximo = np.max(errores)
+
+    # Convertir masas finales a concentraciones
+    C1_final = estados[-1, 0] / V1
+    C2_final = estados[-1, 1] / V2
+
+    resultados[nombre] = estados
+
+    tabla.append([
+        nombre,
+        iteraciones,
+        error_final,
+        error_maximo,
+        tiempo_mediano,
+        tiempo_promedio,
+        desviacion,
+        C1_final,
+        C2_final
+    ])
+
+    print(f"\nMetodo: {nombre}")
+    print(f"Iteraciones totales: {iteraciones}")
+    print(f"Masas finales (mg): {estados[-1]}")
+    print(
+        f"Concentraciones finales (mg/L): "
+        f"[{C1_final:.6f}, {C2_final:.6f}]"
+    )
+    print(f"Error final: {error_final:.6e}")
+    print(f"Error maximo: {error_maximo:.6e}")
+    print(f"Tiempo mediano: {tiempo_mediano:.6e} s")
+    print(f"Tiempo medio: {tiempo_promedio:.6e} s")
+    print(f"Desviacion: {desviacion:.6e} s")
+
+
+# 9. EXPORTAR TABLA CSV
+with open(
+    "caso2_comparacion.csv",
+    "w",
+    newline="",
+    encoding="utf-8"
+) as archivo:
+
+    escritor = csv.writer(archivo)
+
+    escritor.writerow([
+        "Metodo",
+        "Iteraciones totales",
+        "Error final (mg)",
+        "Error maximo (mg)",
+        "Tiempo mediano (s)",
+        "Tiempo promedio (s)",
+        "Desviacion (s)",
+        "Concentracion tanque 1 (mg/L)",
+        "Concentracion tanque 2 (mg/L)"
+    ])
+
+    escritor.writerows(tabla)
+
+
+# 10. GRAFICA DE CONCENTRACIONES
+plt.figure(figsize=(10, 5))
+
+for nombre, estados in resultados.items():
+    plt.plot(
+        tiempos,
+        estados[:, 0] / V1,
+        label=f"Tanque 1 - {nombre}"
+    )
+
+    plt.plot(
+        tiempos,
+        estados[:, 1] / V2,
+        linestyle="--",
+        label=f"Tanque 2 - {nombre}"
+    )
+
+plt.xlabel("Tiempo (min)")
+plt.ylabel("Concentracion (mg/L)")
+plt.title("Evolucion de concentraciones")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+
+plt.savefig(
+    "caso2_concentraciones.png",
+    dpi=300
+)
+
+
+# 11. GRAFICA DE ERRORES
+plt.figure(figsize=(10, 5))
+
+for nombre, estados in resultados.items():
+    errores = np.linalg.norm(
+        estados - referencia,
+        axis=1
+    )
+
+    plt.plot(tiempos, errores, label=nombre)
+
+plt.xlabel("Tiempo (min)")
+plt.ylabel("Error absoluto (mg)")
+plt.title("Error respecto a solucion analitica")
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+
+plt.savefig(
+    "caso2_errores.png",
+    dpi=300
+)
+
+
+# 12. GRAFICA DE TIEMPOS
+nombres = [fila[0] for fila in tabla]
+duraciones = [fila[4] * 1000 for fila in tabla]
+
+plt.figure(figsize=(8, 5))
+plt.bar(nombres, duraciones)
+
+plt.ylabel("Tiempo mediano (ms)")
+plt.title("Comparacion de tiempos de ejecucion")
+plt.grid(axis="y", alpha=0.3)
+plt.tight_layout()
+
+plt.savefig(
+    "caso2_tiempos.png",
+    dpi=300
+)
+
+plt.show()
+
+print("\nArchivos generados:")
+print("- caso2_comparacion.csv")
+print("- caso2_concentraciones.png")
+print("- caso2_errores.png")
+print("- caso2_tiempos.png")
+
