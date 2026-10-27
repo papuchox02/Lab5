@@ -1,0 +1,303 @@
+
+import numpy as np
+import matplotlib.pyplot as plt
+from time import perf_counter
+
+# ==================================================
+# LABORATORIO 5 - METODOS NUMERICOS
+# CASO 1: MODELO DEPREDADOR-PRESA
+# ==================================================
+
+# 1. PARAMETROS DEL MODELO
+alpha = 0.4       # Crecimiento de conejos
+beta = 0.002      # Depredacion
+gamma = 0.3       # Mortalidad de zorros
+delta = 0.001     # Reproduccion de zorros
+
+x0 = 300.0        # Conejos iniciales
+y0 = 150.0        # Zorros iniciales
+
+tiempo_final = 50.0
+paso = 0.1
+tolerancia = 1e-8
+max_iter = 1000
+
+
+# 2. MODELO LOTKA-VOLTERRA
+def modelo(estado):
+    x, y = estado
+
+    dx = alpha * x - beta * x * y
+    dy = delta * x * y - gamma * y
+
+    return np.array([dx, dy], dtype=float)
+
+
+# 3. METODOS PARA ENCONTRAR RAICES
+# En el equilibrio de coexistencia:
+# alpha - beta*y = 0
+# delta*x - gamma = 0
+
+def funcion_x(x):
+    return delta * x - gamma
+
+
+def funcion_y(y):
+    return alpha - beta * y
+
+
+def biseccion(f, a, b, tol=tolerancia):
+    if f(a) * f(b) > 0:
+        raise ValueError("El intervalo no encierra una raiz")
+
+    for i in range(1, max_iter + 1):
+        c = (a + b) / 2
+
+        if abs(f(c)) < tol or (b - a) / 2 < tol:
+            return c, i
+
+        if f(a) * f(c) <= 0:
+            b = c
+        else:
+            a = c
+
+    raise RuntimeError("Biseccion no convergio")
+
+
+def falsa_posicion(f, a, b, tol=tolerancia):
+    fa, fb = f(a), f(b)
+
+    if fa * fb > 0:
+        raise ValueError("El intervalo no encierra una raiz")
+
+    for i in range(1, max_iter + 1):
+        if abs(fb - fa) < 1e-15:
+            raise ValueError("Division por cero")
+
+        c = (a * fb - b * fa) / (fb - fa)
+        fc = f(c)
+
+        if abs(fc) < tol:
+            return c, i
+
+        if fa * fc < 0:
+            b, fb = c, fc
+        else:
+            a, fa = c, fc
+
+    raise RuntimeError("Falsa posicion no convergio")
+
+
+def secante(f, x_anterior, x_actual, tol=tolerancia):
+    for i in range(1, max_iter + 1):
+        f0, f1 = f(x_anterior), f(x_actual)
+
+        if abs(f1 - f0) < 1e-15:
+            raise ValueError("Division por cero")
+
+        x_nuevo = x_actual - f1 * (
+            x_actual - x_anterior
+        ) / (f1 - f0)
+
+        if abs(f(x_nuevo)) < tol:
+            return x_nuevo, i
+
+        x_anterior, x_actual = x_actual, x_nuevo
+
+    raise RuntimeError("Secante no convergio")
+
+
+def punto_fijo(f, x_inicial, factor, tol=tolerancia):
+    x = x_inicial
+
+    for i in range(1, max_iter + 1):
+        x_nuevo = x - factor * f(x)
+
+        if abs(f(x_nuevo)) < tol:
+            return x_nuevo, i
+
+        x = x_nuevo
+
+    raise RuntimeError("Punto fijo no convergio")
+
+
+# 4. NEWTON-RAPHSON PARA EL SISTEMA COMPLETO
+def jacobiano(estado):
+    x, y = estado
+
+    return np.array([
+        [alpha - beta * y, -beta * x],
+        [delta * y, delta * x - gamma]
+    ], dtype=float)
+
+
+def newton_sistema(inicial, tol=tolerancia):
+    estado = np.array(inicial, dtype=float)
+
+    for i in range(1, max_iter + 1):
+        F = modelo(estado)
+        J = jacobiano(estado)
+
+        cambio = np.linalg.solve(J, -F)
+        estado = estado + cambio
+
+        if np.linalg.norm(modelo(estado)) < tol:
+            return estado, i
+
+    raise RuntimeError("Newton-Raphson no convergio")
+
+
+# 5. COMPARACION DE METODOS PARA EL EQUILIBRIO
+metodos = {
+    "Biseccion": lambda: (
+        biseccion(funcion_x, 100, 500),
+        biseccion(funcion_y, 100, 300)
+    ),
+    "Falsa posicion": lambda: (
+        falsa_posicion(funcion_x, 100, 500),
+        falsa_posicion(funcion_y, 100, 300)
+    ),
+    "Secante": lambda: (
+        secante(funcion_x, 100, 500),
+        secante(funcion_y, 100, 300)
+    ),
+    "Punto fijo": lambda: (
+        punto_fijo(funcion_x, 100, 500),
+        punto_fijo(funcion_y, 100, -500)
+    ),
+    "Newton-Raphson": lambda: newton_sistema(
+        [280.0, 180.0]
+    )
+}
+
+equilibrio_exacto = np.array([
+    gamma / delta,
+    alpha / beta
+])
+
+print("\n=== COMPARACION DE METODOS ===")
+print(f"Equilibrio de referencia: {equilibrio_exacto}")
+print("-" * 75)
+
+for nombre, metodo in metodos.items():
+    try:
+        inicio = perf_counter()
+        resultado = metodo()
+        duracion = perf_counter() - inicio
+
+        if nombre == "Newton-Raphson":
+            solucion, iteraciones = resultado
+        else:
+            (x, ix), (y, iy) = resultado
+            solucion = np.array([x, y])
+            iteraciones = ix + iy
+
+        error = np.linalg.norm(
+            solucion - equilibrio_exacto
+        )
+
+        print(
+            f"{nombre:17s} | "
+            f"Solucion: {np.round(solucion, 6)} | "
+            f"Iter: {iteraciones:4d} | "
+            f"Error: {error:.3e} | "
+            f"Tiempo: {duracion:.6e} s"
+        )
+
+    except (RuntimeError, ValueError, np.linalg.LinAlgError) as e:
+        print(f"{nombre}: {e}")
+
+
+# 6. SIMULACION TEMPORAL - METODO DE EULER
+def euler(inicial, tiempos):
+    estados = np.zeros((len(tiempos), 2))
+    estados[0] = inicial
+
+    for i in range(len(tiempos) - 1):
+        h = tiempos[i + 1] - tiempos[i]
+        estados[i + 1] = estados[i] + h * modelo(estados[i])
+
+    return estados
+
+
+# 7. SIMULACION TEMPORAL - RUNGE-KUTTA 4
+def rk4(inicial, tiempos):
+    estados = np.zeros((len(tiempos), 2))
+    estados[0] = inicial
+
+    for i in range(len(tiempos) - 1):
+        h = tiempos[i + 1] - tiempos[i]
+        estado = estados[i]
+
+        k1 = modelo(estado)
+        k2 = modelo(estado + h * k1 / 2)
+        k3 = modelo(estado + h * k2 / 2)
+        k4 = modelo(estado + h * k3)
+
+        estados[i + 1] = estado + h * (
+            k1 + 2*k2 + 2*k3 + k4
+        ) / 6
+
+    return estados
+
+
+# 8. EJECUCION DE LAS SIMULACIONES
+tiempos = np.linspace(
+    0,
+    tiempo_final,
+    round(tiempo_final / paso) + 1
+)
+
+inicio = perf_counter()
+resultado_euler = euler([x0, y0], tiempos)
+tiempo_euler = perf_counter() - inicio
+
+inicio = perf_counter()
+resultado_rk4 = rk4([x0, y0], tiempos)
+tiempo_rk4 = perf_counter() - inicio
+
+print("\n=== SIMULACION TEMPORAL ===")
+print(f"Euler: {tiempo_euler:.6e} segundos")
+print(f"RK4:   {tiempo_rk4:.6e} segundos")
+
+print("\nPoblaciones finales:")
+print("Euler:", resultado_euler[-1])
+print("RK4:  ", resultado_rk4[-1])
+
+
+# 9. GRAFICAS
+fig, ejes = plt.subplots(1, 2, figsize=(13, 5))
+
+# Grafica de poblaciones con RK4
+ejes[0].plot(
+    tiempos, resultado_rk4[:, 0],
+    label="Conejos", color="blue"
+)
+ejes[0].plot(
+    tiempos, resultado_rk4[:, 1],
+    label="Zorros", color="red"
+)
+ejes[0].set_title("Evolucion de las poblaciones")
+ejes[0].set_xlabel("Tiempo")
+ejes[0].set_ylabel("Poblacion")
+ejes[0].legend()
+ejes[0].grid(True)
+
+# Comparacion Euler vs RK4 para conejos
+ejes[1].plot(
+    tiempos, resultado_euler[:, 0],
+    label="Euler", linestyle="--"
+)
+ejes[1].plot(
+    tiempos, resultado_rk4[:, 0],
+    label="Runge-Kutta 4"
+)
+ejes[1].set_title("Comparacion de metodos - Conejos")
+ejes[1].set_xlabel("Tiempo")
+ejes[1].set_ylabel("Poblacion de conejos")
+ejes[1].legend()
+ejes[1].grid(True)
+
+plt.tight_layout()
+plt.savefig("caso1_resultados.png", dpi=300)
+plt.show()
