@@ -1,0 +1,552 @@
+"""Comparación de métodos numéricos para el modelo de Lotka-Volterra."""
+
+import csv
+from pathlib import Path
+from statistics import mean, median, pstdev
+from time import perf_counter
+from typing import Callable
+
+import matplotlib.pyplot as plt
+import numpy as np
+
+# ============================================================
+# LABORATORIO 5 - MÉTODOS NUMÉRICOS
+# CASO 1: MODELO DEPREDADOR-PRESA DE LOTKA-VOLTERRA
+# ============================================================
+
+# Parámetros y condiciones iniciales originales del problema.
+alpha = 0.4       # Crecimiento de conejos
+beta = 0.002      # Depredación
+gamma = 0.3       # Mortalidad de zorros
+delta = 0.001     # Reproducción de zorros
+
+x0 = 300.0        # Conejos iniciales
+y0 = 150.0        # Zorros iniciales
+
+tiempo_final = 50.0
+paso = 0.1
+tolerancia = 1e-8
+max_iter = 1000
+repeticiones_tiempo = 100
+factor_paso_referencia = 100
+
+DIRECTORIO_SALIDA = Path(__file__).resolve().parent
+
+
+# ------------------------------------------------------------
+# Modelo y ecuaciones para el equilibrio de coexistencia
+# ------------------------------------------------------------
+def modelo(estado: np.ndarray) -> np.ndarray:
+    """Derivadas del modelo, con estado [conejos, zorros]."""
+    x, y = estado
+    dx = alpha * x - beta * x * y
+    dy = delta * x * y - gamma * y
+    return np.array([dx, dy], dtype=float)
+
+
+def funcion_x(x: float) -> float:
+    """Ecuación escalar cuyo cero da la población de conejos."""
+    return delta * x - gamma
+
+
+def funcion_y(y: float) -> float:
+    """Ecuación escalar cuyo cero da la población de zorros."""
+    return alpha - beta * y
+
+
+# ------------------------------------------------------------
+# Métodos de búsqueda de raíces
+# ------------------------------------------------------------
+def biseccion(
+    f: Callable[[float], float],
+    a: float,
+    b: float,
+    tol: float = tolerancia,
+    limite: int = max_iter,
+) -> tuple[float, int]:
+    """Busca una raíz en un intervalo que debe encerrar un cambio de signo."""
+    fa, fb = f(a), f(b)
+    if abs(fa) <= tol:
+        return a, 0
+    if abs(fb) <= tol:
+        return b, 0
+    if fa * fb > 0:
+        raise ValueError("El intervalo no encierra una raíz.")
+
+    for iteracion in range(1, limite + 1):
+        c = (a + b) / 2.0
+        fc = f(c)
+        if abs(fc) <= tol or (b - a) / 2.0 <= tol:
+            return c, iteracion
+        if fa * fc < 0:
+            b, fb = c, fc
+        else:
+            a, fa = c, fc
+
+    raise RuntimeError("Bisección no convergió dentro del límite.")
+
+
+def falsa_posicion(
+    f: Callable[[float], float],
+    a: float,
+    b: float,
+    tol: float = tolerancia,
+    limite: int = max_iter,
+) -> tuple[float, int]:
+    """Busca una raíz por interpolación lineal dentro de un intervalo."""
+    fa, fb = f(a), f(b)
+    if abs(fa) <= tol:
+        return a, 0
+    if abs(fb) <= tol:
+        return b, 0
+    if fa * fb > 0:
+        raise ValueError("El intervalo no encierra una raíz.")
+
+    for iteracion in range(1, limite + 1):
+        denominador = fb - fa
+        if abs(denominador) <= np.finfo(float).eps:
+            raise ZeroDivisionError("Falsa posición encontró un denominador nulo.")
+        c = (a * fb - b * fa) / denominador
+        fc = f(c)
+        if abs(fc) <= tol:
+            return c, iteracion
+        if fa * fc < 0:
+            b, fb = c, fc
+        else:
+            a, fa = c, fc
+
+    raise RuntimeError("Falsa posición no convergió dentro del límite.")
+
+
+def secante(
+    f: Callable[[float], float],
+    x_anterior: float,
+    x_actual: float,
+    tol: float = tolerancia,
+    limite: int = max_iter,
+) -> tuple[float, int]:
+    """Busca una raíz con dos aproximaciones iniciales."""
+    f_anterior, f_actual = f(x_anterior), f(x_actual)
+    if abs(f_anterior) <= tol:
+        return x_anterior, 0
+    if abs(f_actual) <= tol:
+        return x_actual, 0
+
+    for iteracion in range(1, limite + 1):
+        denominador = f_actual - f_anterior
+        if abs(denominador) <= np.finfo(float).eps:
+            raise ZeroDivisionError("Secante encontró un denominador nulo.")
+        x_nuevo = x_actual - f_actual * (
+            (x_actual - x_anterior) / denominador
+        )
+        f_nuevo = f(x_nuevo)
+        if abs(f_nuevo) <= tol:
+            return x_nuevo, iteracion
+        x_anterior, f_anterior = x_actual, f_actual
+        x_actual, f_actual = x_nuevo, f_nuevo
+
+    raise RuntimeError("Secante no convergió dentro del límite.")
+
+
+def punto_fijo(
+    f: Callable[[float], float],
+    x_inicial: float,
+    factor: float,
+    tol: float = tolerancia,
+    limite: int = max_iter,
+) -> tuple[float, int]:
+    """Itera x[n+1] = x[n] - factor*f(x[n])."""
+    x = x_inicial
+    for iteracion in range(1, limite + 1):
+        x_nuevo = x - factor * f(x)
+        if abs(x_nuevo - x) <= tol and abs(f(x_nuevo)) <= tol:
+            return x_nuevo, iteracion
+        x = x_nuevo
+    raise RuntimeError("Punto fijo no convergió dentro del límite.")
+
+
+def jacobiano(estado: np.ndarray) -> np.ndarray:
+    """Jacobiano del sistema diferencial, usado en Newton-Raphson."""
+    x, y = estado
+    return np.array(
+        [
+            [alpha - beta * y, -beta * x],
+            [delta * y, delta * x - gamma],
+        ],
+        dtype=float,
+    )
+
+
+def newton_sistema(
+    inicial: tuple[float, float],
+    tol: float = tolerancia,
+    limite: int = max_iter,
+) -> tuple[np.ndarray, int]:
+    """Resuelve el sistema de equilibrio mediante Newton-Raphson."""
+    estado = np.array(inicial, dtype=float)
+    for iteracion in range(1, limite + 1):
+        residuo = modelo(estado)
+        if np.linalg.norm(residuo, ord=np.inf) <= tol:
+            return estado, iteracion - 1
+        cambio = np.linalg.solve(jacobiano(estado), -residuo)
+        estado = estado + cambio
+        if not np.all(np.isfinite(estado)):
+            raise FloatingPointError("Newton-Raphson produjo valores no finitos.")
+
+    if np.linalg.norm(modelo(estado), ord=np.inf) <= tol:
+        return estado, limite
+    raise RuntimeError("Newton-Raphson no convergió dentro del límite.")
+
+
+def crear_metodos() -> dict[str, Callable[[], tuple[np.ndarray, int]]]:
+    """Prepara cada método con los intervalos e inicios originales."""
+    return {
+        "Punto fijo": _resolver_punto_fijo,
+        "Bisección": lambda: _resolver_por_componentes(
+            biseccion, (100.0, 500.0), (100.0, 300.0)
+        ),
+        "Newton-Raphson": lambda: newton_sistema((280.0, 180.0)),
+        "Secante": lambda: _resolver_secante(),
+        "Falsa posición": lambda: _resolver_por_componentes(
+            falsa_posicion, (100.0, 500.0), (100.0, 300.0)
+        ),
+    }
+
+
+def _resolver_punto_fijo() -> tuple[np.ndarray, int]:
+    x, iter_x = punto_fijo(funcion_x, 100.0, 500.0)
+    y, iter_y = punto_fijo(funcion_y, 100.0, -500.0)
+    return np.array([x, y]), iter_x + iter_y
+
+
+def _resolver_por_componentes(
+    metodo: Callable[..., tuple[float, int]],
+    intervalo_x: tuple[float, float],
+    intervalo_y: tuple[float, float],
+) -> tuple[np.ndarray, int]:
+    """Aplica un método escalar a ambas ecuaciones del equilibrio."""
+    x, iter_x = metodo(funcion_x, *intervalo_x)
+    y, iter_y = metodo(funcion_y, *intervalo_y)
+    return np.array([x, y]), iter_x + iter_y
+
+
+def _resolver_secante() -> tuple[np.ndarray, int]:
+    x, iter_x = secante(funcion_x, 100.0, 500.0)
+    y, iter_y = secante(funcion_y, 100.0, 300.0)
+    return np.array([x, y]), iter_x + iter_y
+
+
+def medir_metodo(
+    metodo: Callable[[], tuple[np.ndarray, int]],
+    repeticiones: int = repeticiones_tiempo,
+) -> tuple[np.ndarray, int, dict[str, float]]:
+    """Calienta y mide el método varias veces para reducir fluctuaciones."""
+    metodo()  # Ejecución de calentamiento excluida de las estadísticas.
+    duraciones = []
+    solucion = np.array([])
+    iteraciones = 0
+    for _ in range(repeticiones):
+        inicio = perf_counter()
+        solucion, iteraciones = metodo()
+        duraciones.append(perf_counter() - inicio)
+
+    estadisticas = {
+        "tiempo_medio_s": mean(duraciones),
+        "tiempo_mediano_s": median(duraciones),
+        "desviacion_tiempo_s": pstdev(duraciones),
+        "tiempo_minimo_s": min(duraciones),
+    }
+    return solucion, iteraciones, estadisticas
+
+
+# ------------------------------------------------------------
+# Integradores temporales: separados de la búsqueda de equilibrio
+# ------------------------------------------------------------
+def euler(inicial: np.ndarray, tiempos: np.ndarray) -> np.ndarray:
+    """Integra el sistema con el método explícito de Euler."""
+    estados = np.zeros((len(tiempos), 2), dtype=float)
+    estados[0] = inicial
+    for i in range(len(tiempos) - 1):
+        h = tiempos[i + 1] - tiempos[i]
+        estados[i + 1] = estados[i] + h * modelo(estados[i])
+    return estados
+
+
+def rk4(inicial: np.ndarray, tiempos: np.ndarray) -> np.ndarray:
+    """Integra el sistema con Runge-Kutta clásico de cuarto orden."""
+    estados = np.zeros((len(tiempos), 2), dtype=float)
+    estados[0] = inicial
+    for i in range(len(tiempos) - 1):
+        h = tiempos[i + 1] - tiempos[i]
+        estado = estados[i]
+        k1 = modelo(estado)
+        k2 = modelo(estado + h * k1 / 2.0)
+        k3 = modelo(estado + h * k2 / 2.0)
+        k4 = modelo(estado + h * k3)
+        estados[i + 1] = estado + h * (k1 + 2 * k2 + 2 * k3 + k4) / 6.0
+    return estados
+
+
+def crear_malla_temporal(paso_malla: float) -> np.ndarray:
+    """Crea una malla uniforme que incluye exactamente el tiempo final."""
+    cantidad_pasos = round(tiempo_final / paso_malla)
+    if cantidad_pasos <= 0 or not np.isclose(
+        cantidad_pasos * paso_malla, tiempo_final
+    ):
+        raise ValueError("El paso debe dividir el tiempo final.")
+    return np.linspace(0.0, tiempo_final, cantidad_pasos + 1)
+
+
+def comparar_precision_temporal() -> tuple[
+    np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[dict[str, float]]
+]:
+    """Compara Euler y RK4 con RK4 de paso 100 veces menor como referencia."""
+    tiempos = crear_malla_temporal(paso)
+    paso_referencia = paso / factor_paso_referencia
+    tiempos_referencia = crear_malla_temporal(paso_referencia)
+
+    # La malla de referencia contiene exactamente 100 subpasos por cada
+    # paso de la malla original, por lo que se pueden alinear sin interpolar.
+    estados_referencia_completos = rk4(
+        np.array([x0, y0], dtype=float), tiempos_referencia
+    )
+    estados_referencia = estados_referencia_completos[::factor_paso_referencia]
+    estados_euler = euler(np.array([x0, y0], dtype=float), tiempos)
+    estados_rk4 = rk4(np.array([x0, y0], dtype=float), tiempos)
+
+    filas = []
+    for nombre, estados in (("Euler", estados_euler), ("Runge-Kutta 4", estados_rk4)):
+        errores = np.abs(estados - estados_referencia)
+        normas = np.linalg.norm(errores, axis=1)
+        filas.append(
+            {
+                "metodo": nombre,
+                "error_maximo_conejos": float(np.max(errores[:, 0])),
+                "error_maximo_zorros": float(np.max(errores[:, 1])),
+                "error_maximo_norma": float(np.max(normas)),
+                "error_rms_norma": float(np.sqrt(np.mean(normas**2))),
+            }
+        )
+    return tiempos, estados_euler, estados_rk4, estados_referencia, filas
+
+
+# ------------------------------------------------------------
+# Exportación de resultados y visualización
+# ------------------------------------------------------------
+def exportar_csv(
+    nombre_archivo: str, filas: list[dict[str, object]]
+) -> Path:
+    """Escribe filas de resultados en CSV junto al archivo fuente."""
+    destino = DIRECTORIO_SALIDA / nombre_archivo
+    if not filas:
+        raise ValueError("No hay resultados para exportar.")
+    with destino.open("w", newline="", encoding="utf-8-sig") as archivo:
+        escritor = csv.DictWriter(archivo, fieldnames=list(filas[0].keys()))
+        escritor.writeheader()
+        escritor.writerows(filas)
+    return destino
+
+
+def crear_graficas(
+    tiempos: np.ndarray,
+    estados_euler: np.ndarray,
+    estados_rk4: np.ndarray,
+    estados_referencia: np.ndarray,
+) -> None:
+    """Genera y guarda gráficas con etiquetas, unidades y estilo de informe."""
+    plt.rcParams.update(
+        {
+            "font.size": 10,
+            "axes.titlesize": 12,
+            "axes.labelsize": 10,
+            "figure.dpi": 120,
+            "savefig.dpi": 300,
+        }
+    )
+    colores = ("#0072B2", "#D55E00")
+    nombres = ("Conejos", "Zorros")
+
+    # Evolución poblacional con RK4 y parámetros explícitos en el pie.
+    fig, eje = plt.subplots(figsize=(9, 5.2))
+    eje.plot(tiempos, estados_rk4[:, 0], color=colores[0], label="Conejos")
+    eje.plot(tiempos, estados_rk4[:, 1], color=colores[1], label="Zorros")
+    eje.set_title("Modelo de Lotka-Volterra: evolución poblacional (RK4)")
+    eje.set_xlabel("Tiempo")
+    eje.set_ylabel("Población")
+    eje.grid(True, linestyle=":", alpha=0.65)
+    eje.legend(frameon=True)
+    fig.text(
+        0.5,
+        0.01,
+        f"α={alpha}, β={beta}, γ={gamma}, δ={delta}; "
+        f"condición inicial=({x0:g}, {y0:g}), h={paso:g}",
+        ha="center",
+        fontsize=8,
+    )
+    fig.tight_layout(rect=(0, 0.05, 1, 1))
+    fig.savefig(DIRECTORIO_SALIDA / "caso1_poblaciones_rk4.png", bbox_inches="tight")
+    plt.close(fig)
+
+    # Contrasta los métodos gruesos con RK4 de paso fino en cada población.
+    fig, ejes = plt.subplots(1, 2, figsize=(12, 4.8), sharex=True)
+    for indice, eje in enumerate(ejes):
+        eje.plot(
+            tiempos,
+            estados_referencia[:, indice],
+            color="black",
+            linewidth=1.8,
+            label="Referencia (RK4, h/100)",
+        )
+        eje.plot(
+            tiempos,
+            estados_rk4[:, indice],
+            color=colores[indice],
+            linestyle="--",
+            label="Runge-Kutta 4",
+        )
+        eje.plot(
+            tiempos,
+            estados_euler[:, indice],
+            color="#009E73",
+            linestyle=":",
+            label="Euler",
+        )
+        eje.set_title(nombres[indice])
+        eje.set_xlabel("Tiempo")
+        eje.set_ylabel("Población")
+        eje.grid(True, linestyle=":", alpha=0.65)
+        eje.legend(fontsize=8)
+    fig.suptitle("Comparación temporal de Euler y Runge-Kutta 4")
+    fig.tight_layout()
+    fig.savefig(DIRECTORIO_SALIDA / "caso1_comparacion_temporal.png", bbox_inches="tight")
+    plt.close(fig)
+
+    # Error absoluto por especie contra la solución numérica de referencia.
+    fig, ejes = plt.subplots(1, 2, figsize=(12, 4.8), sharex=True)
+    metodos_grafica = (
+        ("Euler", estados_euler, "#009E73", "-"),
+        ("Runge-Kutta 4", estados_rk4, "#CC79A7", "--"),
+    )
+    for indice, eje in enumerate(ejes):
+        for nombre, estados, color, estilo in metodos_grafica:
+            error = np.abs(estados[:, indice] - estados_referencia[:, indice])
+            eje.semilogy(
+                tiempos,
+                np.maximum(error, np.finfo(float).tiny),
+                color=color,
+                linestyle=estilo,
+                label=nombre,
+            )
+        eje.set_title(f"Error absoluto: {nombres[indice].lower()}")
+        eje.set_xlabel("Tiempo")
+        eje.set_ylabel("Error absoluto (escala logarítmica)")
+        eje.grid(True, which="both", linestyle=":", alpha=0.65)
+        eje.legend()
+    fig.suptitle("Precisión temporal respecto a RK4 con paso h/100")
+    fig.tight_layout()
+    fig.savefig(DIRECTORIO_SALIDA / "caso1_errores_temporales.png", bbox_inches="tight")
+    plt.close(fig)
+
+
+def imprimir_tabla(filas: list[dict[str, object]]) -> None:
+    """Muestra una tabla compacta con precisión y estadísticas de tiempo."""
+    encabezado = (
+        f"{'Método':<18} {'Conejos':>12} {'Zorros':>12} "
+        f"{'Iter.':>7} {'Error abs. norma':>18} "
+        f"{'Mediana (s)':>14} {'Media ± desv. (s)':>24}"
+    )
+    print(encabezado)
+    print("-" * len(encabezado))
+    for fila in filas:
+        print(
+            f"{fila['metodo']:<18} "
+            f"{fila['solucion_conejos']:>12.8f} "
+            f"{fila['solucion_zorros']:>12.8f} "
+            f"{fila['iteraciones']:>7} "
+            f"{fila['error_absoluto_norma']:>18.3e} "
+            f"{fila['tiempo_mediano_s']:>14.3e} "
+            f"{fila['tiempo_medio_s']:.3e} ± "
+            f"{fila['desviacion_tiempo_s']:.3e}"
+        )
+
+
+def main() -> None:
+    """Ejecuta comparación de raíces, simulaciones, exportaciones y gráficas."""
+    equilibrio_coexistencia = np.array([gamma / delta, alpha / beta])
+    equilibrio_trivial = np.array([0.0, 0.0])
+
+    print("=== Equilibrios del modelo ===")
+    print(f"Equilibrio trivial: {equilibrio_trivial}")
+    print(
+        "Equilibrio de coexistencia (referencia analítica): "
+        f"{equilibrio_coexistencia}"
+    )
+    print(
+        "\nLos cinco métodos se comparan para el equilibrio de coexistencia; "
+        "el equilibrio trivial se informa por separado."
+    )
+
+    filas_raices: list[dict[str, object]] = []
+    for nombre, metodo in crear_metodos().items():
+        solucion, iteraciones, tiempos_medidos = medir_metodo(metodo)
+        errores_componentes = np.abs(solucion - equilibrio_coexistencia)
+        error_norma = float(np.linalg.norm(errores_componentes))
+        fila: dict[str, object] = {
+            "metodo": nombre,
+            "solucion_conejos": float(solucion[0]),
+            "solucion_zorros": float(solucion[1]),
+            "iteraciones": iteraciones,
+            "error_absoluto_conejos": float(errores_componentes[0]),
+            "error_absoluto_zorros": float(errores_componentes[1]),
+            "error_absoluto_norma": error_norma,
+            **tiempos_medidos,
+            "repeticiones_tiempo": repeticiones_tiempo,
+        }
+        filas_raices.append(fila)
+
+    print("\n=== Comparación de métodos de búsqueda de raíces ===")
+    print(f"Error absoluto: distancia a {equilibrio_coexistencia}.")
+    imprimir_tabla(filas_raices)
+    archivo_raices = exportar_csv("caso1_comparacion_metodos.csv", filas_raices)
+
+    (
+        tiempos,
+        estados_euler,
+        estados_rk4,
+        estados_referencia,
+        filas_precision,
+    ) = comparar_precision_temporal()
+    archivo_precision = exportar_csv(
+        "caso1_precision_temporal.csv", filas_precision
+    )
+
+    error_final_euler = np.linalg.norm(estados_euler[-1] - estados_referencia[-1])
+    error_final_rk4 = np.linalg.norm(estados_rk4[-1] - estados_referencia[-1])
+    print("\n=== Simulación temporal ===")
+    print(
+        f"Referencia: RK4 con paso h/{factor_paso_referencia} "
+        f"= {paso / factor_paso_referencia:g}."
+    )
+    print(f"Población final Euler: {estados_euler[-1]}")
+    print(f"Población final RK4:   {estados_rk4[-1]}")
+    print(f"Error final (norma) Euler vs referencia: {error_final_euler:.6e}")
+    print(f"Error final (norma) RK4 vs referencia:   {error_final_rk4:.6e}")
+    for fila in filas_precision:
+        print(
+            f"Error máximo {fila['metodo']}: "
+            f"conejos={fila['error_maximo_conejos']:.6e}, "
+            f"zorros={fila['error_maximo_zorros']:.6e}, "
+            f"norma={fila['error_maximo_norma']:.6e}"
+        )
+
+    crear_graficas(tiempos, estados_euler, estados_rk4, estados_referencia)
+    print("\nArchivos generados:")
+    print(f"- {archivo_raices}")
+    print(f"- {archivo_precision}")
+    print(f"- {DIRECTORIO_SALIDA / 'caso1_poblaciones_rk4.png'}")
+    print(f"- {DIRECTORIO_SALIDA / 'caso1_comparacion_temporal.png'}")
+    print(f"- {DIRECTORIO_SALIDA / 'caso1_errores_temporales.png'}")
+
+
+if __name__ == "__main__":
+    main()
